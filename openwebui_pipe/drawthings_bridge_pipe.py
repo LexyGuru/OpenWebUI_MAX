@@ -1820,120 +1820,129 @@ async def _run_generate_after_parse(
                 if not ok_s:
                     yield starter
                 last_emit_mono = time.monotonic()
-                while True:
-                    try:
-                        ev_name, data = await asyncio.wait_for(
-                            agen.__anext__(), timeout=heartbeat_sec
-                        )
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError:
-                        now = time.monotonic()
-                        if not progress_seen:
+                try:
+                    while True:
+                        try:
+                            ev_name, data = await asyncio.wait_for(
+                                agen.__anext__(), timeout=heartbeat_sec
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            now = time.monotonic()
+                            if not progress_seen:
+                                if last_emit_mono > 0 and now - last_emit_mono < min_replace_sec:
+                                    continue
+                                wait = _stream_waiting_cli_placeholder_md(valves, summary_prefix)
+                                ok_w = await _owui_emit_replace(emitter, wait)
+                                if not ok_w:
+                                    yield wait
+                                last_emit_mono = time.monotonic()
+                                continue
                             if last_emit_mono > 0 and now - last_emit_mono < min_replace_sec:
                                 continue
-                            wait = _stream_waiting_cli_placeholder_md(valves, summary_prefix)
-                            ok_w = await _owui_emit_replace(emitter, wait)
-                            if not ok_w:
-                                yield wait
+                            content = _full_progress_md(include_title=False)
+                            ok = await _owui_emit_replace(emitter, content)
+                            if not ok:
+                                yield content
                             last_emit_mono = time.monotonic()
                             continue
-                        if last_emit_mono > 0 and now - last_emit_mono < min_replace_sec:
-                            continue
-                        content = _full_progress_md(include_title=False)
-                        ok = await _owui_emit_replace(emitter, content)
-                        if not ok:
-                            yield content
-                        last_emit_mono = time.monotonic()
-                        continue
 
-                    if ev_name == "progress":
-                        progress_seen = True
-                        cur = data.get("current")
-                        tot = data.get("total")
-                        raw = _raw_percent_from_payload(
-                            data.get("percent"), cur, tot
-                        )
-                        last_monotonic = max(last_monotonic, raw)
-                        last_p = last_monotonic
-                        if isinstance(cur, (int, float)):
-                            last_cur = int(cur)
-                        if isinstance(tot, (int, float)):
-                            last_tot = int(tot)
-                        last_line = data.get("line") or ""
-                        snap = _snap_state()
-                        now = time.monotonic()
-                        if progress_emit_count > 0:
-                            if now - last_emit_mono < min_replace_sec:
-                                continue
-                            if last_emitted_snap is not None and snap == last_emitted_snap:
-                                continue
-                        content = _full_progress_md(include_title=first_block)
-                        ok = await _owui_emit_replace(emitter, content)
-                        if not ok:
-                            yield content
-                        first_block = False
-                        last_emitted_snap = snap
-                        last_emit_mono = time.monotonic()
-                        progress_emit_count += 1
-                    elif ev_name == "done":
-                        b64 = data.get("image_base64")
-                        if not b64:
-                            err = f"Hiányzó kép a válaszból: `{data!r}`"
-                            if summary_prefix:
-                                full_e = summary_prefix + "\n\n" + err
+                        if ev_name == "progress":
+                            progress_seen = True
+                            cur = data.get("current")
+                            tot = data.get("total")
+                            raw = _raw_percent_from_payload(
+                                data.get("percent"), cur, tot
+                            )
+                            last_monotonic = max(last_monotonic, raw)
+                            last_p = last_monotonic
+                            if isinstance(cur, (int, float)):
+                                last_cur = int(cur)
+                            if isinstance(tot, (int, float)):
+                                last_tot = int(tot)
+                            last_line = data.get("line") or ""
+                            snap = _snap_state()
+                            now = time.monotonic()
+                            if progress_emit_count > 0:
+                                if now - last_emit_mono < min_replace_sec:
+                                    continue
+                                if last_emitted_snap is not None and snap == last_emitted_snap:
+                                    continue
+                            content = _full_progress_md(include_title=first_block)
+                            ok = await _owui_emit_replace(emitter, content)
+                            if not ok:
+                                yield content
+                            first_block = False
+                            last_emitted_snap = snap
+                            last_emit_mono = time.monotonic()
+                            progress_emit_count += 1
+                        elif ev_name == "done":
+                            b64 = data.get("image_base64")
+                            if not b64:
+                                err = f"Hiányzó kép a válaszból: `{data!r}`"
+                                if summary_prefix:
+                                    full_e = summary_prefix + "\n\n" + err
+                                else:
+                                    full_e = err
+                                ok = await _owui_emit_replace(emitter, full_e)
+                                if not ok:
+                                    yield full_e
+                                return
+                            had_progress = (
+                                last_p > 1e-6
+                                or last_cur is not None
+                                or last_tot is not None
+                            )
+                            pre = ""
+                            if had_progress:
+                                pre = _progress_for_valves(
+                                    valves,
+                                    percent_0_1=last_p,
+                                    current=last_cur,
+                                    total=last_tot,
+                                    line=last_line,
+                                    include_title=False,
+                                )
+                            tail = (
+                                "### Kész\n\n"
+                                + f"![Draw Things](data:image/png;base64,{b64})"
+                            )
+                            if pre:
+                                final_c = (
+                                    (summary_prefix + "\n\n" + pre + "\n\n" + tail)
+                                    if summary_prefix
+                                    else (pre + "\n\n" + tail)
+                                )
                             else:
-                                full_e = err
+                                final_c = (
+                                    (summary_prefix + "\n\n" + tail)
+                                    if summary_prefix
+                                    else tail
+                                )
+                            ok = await _owui_emit_replace(emitter, final_c)
+                            if not ok:
+                                yield final_c
+                            return
+                        elif ev_name == "error":
+                            err = f"**Bridge hiba:** {data.get('error', data)}"
+                            full_e = (
+                                (summary_prefix + "\n\n" + err)
+                                if summary_prefix
+                                else err
+                            )
                             ok = await _owui_emit_replace(emitter, full_e)
                             if not ok:
                                 yield full_e
                             return
-                        had_progress = (
-                            last_p > 1e-6
-                            or last_cur is not None
-                            or last_tot is not None
-                        )
-                        pre = ""
-                        if had_progress:
-                            pre = _progress_for_valves(
-                                valves,
-                                percent_0_1=last_p,
-                                current=last_cur,
-                                total=last_tot,
-                                line=last_line,
-                                include_title=False,
-                            )
-                        tail = (
-                            "### Kész\n\n"
-                            + f"![Draw Things](data:image/png;base64,{b64})"
-                        )
-                        if pre:
-                            final_c = (
-                                (summary_prefix + "\n\n" + pre + "\n\n" + tail)
-                                if summary_prefix
-                                else (pre + "\n\n" + tail)
-                            )
-                        else:
-                            final_c = (
-                                (summary_prefix + "\n\n" + tail)
-                                if summary_prefix
-                                else tail
-                            )
-                        ok = await _owui_emit_replace(emitter, final_c)
-                        if not ok:
-                            yield final_c
-                        return
-                    elif ev_name == "error":
-                        err = f"**Bridge hiba:** {data.get('error', data)}"
-                        full_e = (
-                            (summary_prefix + "\n\n" + err)
-                            if summary_prefix
-                            else err
-                        )
-                        ok = await _owui_emit_replace(emitter, full_e)
-                        if not ok:
-                            yield full_e
-                        return
+                finally:
+                    # SSE stream lezárása minden kilépési ágon (done/error/return), különben nyitva maradhat.
+                    ac = getattr(agen, "aclose", None)
+                    if callable(ac):
+                        try:
+                            await ac()
+                        except Exception:
+                            pass
             else:
                 yield "\n\n---\n\n" + _stream_started_placeholder_md(valves, "")
                 async for ev_name, data in _iter_sse_events(url, payload):
