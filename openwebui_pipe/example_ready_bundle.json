@@ -1,0 +1,13 @@
+{
+  "ready": true,
+  "prompt": "Anime stílus: egy karakter, otthoni kanapén ül, lágy világítás, részletes, stúdióminőség",
+  "negative_prompt": "rossz anatómia, extra ujjak, vízjel, szöveg a képen, blurry, low quality",
+  "width": 1152,
+  "height": 896,
+  "steps": 8,
+  "guidanceScale": null,
+  "seed": null,
+  "style_label": "Anime",
+  "notes": "nincs megadva / alapértelmezés",
+  "user_confirmation": "A felhasználó nem kért további módosítást."
+}

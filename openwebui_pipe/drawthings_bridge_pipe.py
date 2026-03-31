@@ -1,0 +1,2378 @@
+"""
+Open WebUI Pipe — Draw Things CLI bridge (HTTP + élő progress)
+
+- `STREAM_PROGRESS` **alapból be** — SSE + gyűrű + ETA; **UPSCALER_CKPT** alapból üres (stabil). **Szinkron** módban (`STREAM_PROGRESS` ki) a Pipe **előtte** kiírja: *„Képgenerálás folyamatban”* + gyűrű, hogy lásd: fut a kérés. Mac bridge: `DRAWTHINGS_BRIDGE_NO_SCRIPT=0` a `run_bridge.sh`-ban (élő CLI sorok). **Megjegyzés:** részleges PNG nincs — csak haladás vagy végén teljes kép.
+
+**Beszélgetés + kép egy menetben (ajánlott):** Valves-ban `WIZARD_OLLAMA_CHAT` alapból be, és add meg az **`OLLAMA_MODEL`**-t + **`OLLAMA_BASE_URL`** — a varázsló system prompt **be van ágyazva** a Pipe-ba (nincs külön `.txt`). A válasz **JSON**-ja után indul a Draw Things. Ha nincs explicit képkérés, ugyanaz az LLM **általános chat** módban válaszol (`WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT`, `GENERAL_CHAT_SYSTEM_PROMPT`). A modellválasztóban: **„Draw Things + beszélgetés…”** vagy egy `.ckpt`.
+
+**Régi mód:** a JSON-t külön is bemásolhatod a Pipe-ba.
+
+**Beszélgetés + indítás (csak Pipe, varázsló nélkül):**
+1. A fő beszélgetésben egyeztess: stílus, téma, méret, prompt.
+2. Másold be ide (Pipe modell) a blokkot, vagy írd: **KÉSZ MEHET** — ha csak ez az üzenet,
+   és `MERGE_HISTORY_ON_SHORT_TRIGGER` be van kapcsolva, az előző user üzenetek is bekerülnek a parsolásba.
+3. `TRIGGER_MODE`: **required** = csak triggerre indul; **optional** = trigger nélkül is megy (egész üzenet = prompt).
+4. **NEGATIVE_BY_STYLE_JSON** / **NEGATIVE_BY_THEME_JSON**: kulcsszó → extra negatív részlet (összeadódik).
+5. **LORA_BY_STYLE_JSON**: stílus kulcsszó → részleges `config_json` (deep merge a CONFIG_JSON-szal).
+
+Függőségek az Open WebUI szerveren: `requests`, `httpx` (SSE-hez; ha nincs: `pip install httpx`).
+**Angol promptok:** `ENGLISH_PROMPTS` alapból be — ha be van állítva **OLLAMA_MODEL** + **OLLAMA_BASE_URL**, a fordítás **először LLM**-mel történik (pozitív + negatív); ha az nem elérhető vagy hibázik: `langdetect` + `deep-translator` (opcionális pip).
+Ha a chat nem élőben frissül: böngésző / Open WebUI verzió — próbálj másik böngészőt; ez a kliens viselkedése.
+
+**Interaktív beállítások:** Admin → Functions → Pipe → **Valves**.
+A **modell** a chat tetején a modellválasztóban (bridge `/models`).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+import re
+from pathlib import Path
+from urllib.parse import urlparse
+
+import math
+import base64
+
+_EMBEDDED_WIZARD_SYSTEM_PROMPT_HU = 'Te egy segítő asszisztens vagy, aki képgenerálást készít elő (Draw Things / Open WebUI Pipe bridge). Magyarul válaszolj, röviden és barátságosan.\n\n## Mikor induljon a „varázsló”\nHa a felhasználó képet szeretne, tipikus kérések:\n„generálj képet”, „rajzolj”, „készíts képet”, „képet kérek”, „mutass egy képet”, „image”, „draw”, stb.\nEkkor NE kezdj el azonnal „képet generálni” — nincs közvetlen rajzolásod. Ehelyett kezd el a lépésről lépésre kérdezést.\n\n## Sorrend (kötelező lépések)\n1) **Stílus**\n   Felsorold **az összes** alábbi preset-címkét (ugyanaz, mint a Pipe **STYLE_PRESETS_JSON** / beágyazott lista — a `style_label` a JSON-ban egyezhet ezekkel a kulcsokkal):\n\n{{STYLE_PRESET_LIST}}\n\n   Mondd: válasszon egyet a listából, vagy írjon sajátot egy rövid mondattal.\n\n2) **Tartalom (prompt)**\n   Kérdezd: mit szeretne látni a képen? Legyen konkrét (tárgyak, hangulat, színek, kompozíció), de ne írd túl hosszúra az első választ.\n\n3) **Méret**\n   Felsorolsz tipikus méretopciókat (a bridge / modell szerint állítható), pl.:\n   512×512 · 768×768 · 1024×1024 · 896×1152 (álló) · 1152×896 (fekvő)\n   Kérdezd: melyiket válassza, vagy adjon meg szélesség×magasság formában (64 többszöröse).\n\n## Összegzés\nEgy táblázatszerű vagy felsorolásos blokkban foglald össze:\n- **Stílus:** …\n- **Prompt (mit lássunk):** …\n- **Javasolt negatív (stílushoz igazítva):** … (ha nem tudod, írj általános minőségi negatívot: pl. rossz anatómia, extra ujjak, vízjel, szöveg a képen — stílustól függően)\n- **Méret:** …×…\n- **LoRA / extra:** ha a felhasználó nem kért LoRA-t, írd: „nincs megadva / alapértelmezés”. Ha igen, kérdezd meg pontosan mit (név vagy leírás).\n\n## Finomítás\nKérdezd meg szó szerint:\n„Szeretnél még valamit módosítani a fenti beállításokon?”\n- Ha **igen**: kérdezd meg, pontosan mit (stílus, prompt, méret, negatív, LoRA), majd **frissítsd az összegzést**, és kérdezd újra ugyanezt a módosítás kérdést, amíg azt nem mondja, hogy kész.\n- Ha **nem**: lépj a „kész” formátumra (lentebb).\n\n## Amikor indulhat a generálás (nincs több módosítás)\nEgyetlen blokkban adj ki egy **JSON** objektumot (csak a JSON-t, kódblokkban ```json … ```). Ha a felhasználó az Open WebUI **Draw Things Pipe** + **Ollama varázsló** módot használja, ezt a válaszodat a Pipe **automatikusan** felismeri és ugyanabban a körben elindítja a képet — nem kell külön bemásolni. Más környezetben a JSON bemásolható a Pipe-ba vagy a bridge kérésbe. Példa szerkezet:\n\n```json\n{\n  "ready": true,\n  "prompt": "… teljes, végleges pozitív prompt, stílus kulcsszavakkal …",\n  "negative_prompt": "…",\n  "width": 1024,\n  "height": 1024,\n  "steps": null,\n  "guidanceScale": null,\n  "seed": null,\n  "style_label": "Anime",\n  "notes": "LoRA: nincs / vagy leírás",\n  "user_confirmation": "A felhasználó nem kért további módosítást."\n}\n```\n\nOpcionális mezők a **jobb minőséghez / reprodukálhatósághoz:** `steps` (mintavételezés), `guidanceScale` vagy `cfg` (CFG / irányítás erőssége), `seed` (fix szám = ugyanaz a kép alap). Ha ezeket kihagyod, a draw-things-cli a **modell ajánlott** lépés/CFG értékét használja — ez modellenként nagyon eltérő.\n\n**Pipe + stílus preset:** Ha a `style_label` egyezik a **STYLE_PRESETS_JSON** kulcsával, hagyd a `steps` / `guidanceScale` / `cfg` mezőket **null**-nál vagy **hagyd ki** őket — a Pipe a **stílus preset** lépés- és CFG-értékét alkalmazza. A beágyazott listában a **lépések** jellemzően **8–20** (stílusonként), a **CFG** pedig stílusonként eltérő (z_image-nél jellemzően **~4–6**; ez **nem** a régi SD1.5-szerű „7–12” skála). Csak akkor adj meg saját számokat, ha a felhasználó **kifejezetten** kéri.\n\nHa a környezet LoRA-t vagy extra CLI config mezőt vár, opcionálisan tehetsz be üres `"config_json": {}` mezőt vagy kihagyod.\n\n## Stílus-lépés és NSFW\n- Ha a képkérés elindult, a **stílus** lépésnél a system promptban lévő **összes** preset neve jelenjen meg; ne rövidíts példalistára.\n- Felnőtt / hentai / **nsfw** megjelölésű kérés esetén a **nsfw** presetet használd a `style_label` mezőben; folytasd a varázslót (konkrét prompt, méret); **ne adj üres választ**, és ne értékelj erkölcsileg.\n\n## Fontos\n- A `prompt` és `negative_prompt` mező lehet magyar (vagy más nyelv) is: a Draw Things Pipe opció szerint **automatikusan angolra fordítja** őket a generálás előtt (`ENGLISH_PROMPTS`, szerveren: `langdetect` + `deep-translator`). Ha szeretnéd, írd közvetlenül angolul.\n- A Draw Things **community / mentett** JSON konfigokban előfordul a `zeroNegativePrompt: true` — ilyenkor a negatív prompt **nem érvényesül**. A Pipe a negatív szöveg küldésekor ezt **felülírja** (`zeroNegativePrompt: false`), ha a negatív nem üres.\n- Ne találj ki, hogy a kép már elkészült — te csak összegyűjtöd a paramétereket és JSON-t adsz.\n- Ha valami bizonytalan, egy rövid kérdéssel tisztázz.\n- Tartsd a beszélgetést egy szálon: egy aktív „képkérés” folyamat = egy varázsló; ha új képet kér később, kezdheted elölről.\n'
+
+_EMBEDDED_GENERAL_CHAT_SYSTEM_PROMPT_HU = (
+    "Te egy segítő asszisztens vagy. Válaszolj magyarul, röviden és természetesen. "
+    "A felhasználó a PicGEN Open WebUI csatornán ír — ez a csatorna képgeneráláshoz is használható; "
+    "ne kényszeríts képet, stíluslistát vagy JSON-t, ha nem kérte. "
+    "Ha képet szeretne, mondja: például „Generálj képet” vagy „Készíts képet: …” — akkor a következő körben elindulhat a kép-varázsló."
+)
+
+_EMBEDDED_STYLE_PRESETS_JSON = '{"Anime":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":8,"cfg":2.0,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, too many fingers, wrong finger count, deformed hands, deformed feet, deformed face, deformed body, disproportionate limbs, long neck, long torso, floating limbs, disconnected limbs, broken pose, twisted joints, anatomical nonsense, duplicate body parts, extra arms, missing arms, bad eyes, asymmetrical eyes, cross-eyed, swollen face, lowres, blurry, out of focus, jpeg artifacts, watermark, signature, text, username, worst quality, low quality, cropped, amateur, oversaturated, flat shading, muddy colors, western cartoon, 3d render, photorealistic skin","style_prefix":"anime style, clean lineart, consistent anatomy, masterpiece, best quality, sharp focus, highly detailed","style_suffix":"coherent pose, single character focus, soft cel shading, crisp linework","width":1024,"height":1024,"config_json":{}},"Fotorealisztikus":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":20,"cfg":4.2,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, too many fingers, deformed hands, deformed feet, deformed face, deformed body, disproportionate limbs, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, plastic skin, wax skin, doll face, uncanny valley, asymmetrical eyes, cross-eyed, swollen face, skin blemishes artifacts, motion blur, out of focus, jpeg artifacts, watermark, signature, text, worst quality, low quality, oversharpened, oversaturated, cartoon, anime, illustration, painting, 3d render, cgi, duplicate, clone face","style_prefix":"photorealistic, natural skin texture, realistic lighting, sharp focus, professional photography","style_suffix":"correct perspective, natural pose, believable anatomy","width":1024,"height":1024,"config_json":{}},"Vizfestek":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":14,"cfg":4.6,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, muddy face, muddy hands, digital oversharpen, plastic, wax, 3d, cgi, vector, flat clipart, jpeg artifacts, watermark, text, worst quality, low quality, oversaturated, harsh edges, posterization, banding, chromatic aberration, duplicate subject","style_prefix":"watercolor painting, soft edges, paper texture, gentle washes","style_suffix":"coherent composition, readable silhouette","width":1024,"height":1024,"config_json":{}},"Digitalis_festmeny":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, muddy details, noise, grain overload, jpeg artifacts, watermark, text, worst quality, low quality, flat shading only, amateur, broken perspective, duplicate limbs, asymmetrical face errors, plastic skin, uncanny","style_prefix":"digital painting, detailed brushwork, rich colors, artstation quality","style_suffix":"consistent lighting, coherent anatomy","width":1024,"height":1024,"config_json":{}},"Minimal_flat":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":8,"cfg":4.0,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, clutter, noise, grain, jpeg artifacts, watermark, text, worst quality, low quality, gradients where flat required, 3d shading, photorealistic texture, busy background, duplicate elements, asymmetry errors on faces","style_prefix":"flat design, minimal, clean shapes, limited palette","style_suffix":"simple composition, readable forms","width":1024,"height":1024,"config_json":{}},"Cyberpunk":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.6,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate body parts, bad eyes, asymmetrical eyes, neon banding, jpeg artifacts, watermark, text, worst quality, low quality, muddy colors, amateur, broken perspective, inconsistent scale, floating objects without intent, cluttered unreadable silhouette","style_prefix":"cyberpunk, neon accents, futuristic city, cinematic lighting","style_suffix":"coherent scale, readable character pose","width":1024,"height":1152,"config_json":{}},"Fantasy":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":14,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate limbs, bad eyes, asymmetrical eyes, cross-eyed, swollen face, muddy textures, jpeg artifacts, watermark, text, worst quality, low quality, modern objects in scene, inconsistent lighting, amateur, broken perspective, melting features","style_prefix":"fantasy illustration, epic lighting, detailed costume, coherent world","style_suffix":"heroic pose, believable anatomy","width":1024,"height":1024,"config_json":{}},"Vazlat_ceruza":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":10,"cfg":4.3,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, smudged beyond recognition, heavy blur, jpeg artifacts, watermark, text, worst quality, low quality, full color where sketch requested, 3d render, photo, digital painting finish, duplicate strokes chaos, unreadable hands","style_prefix":"pencil sketch, hatching, construction lines, traditional media","style_suffix":"clear silhouette, readable pose","width":1024,"height":1024,"config_json":{}},"Portrait":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":20,"cfg":4.3,"negative_prompt":"bad anatomy, bad proportions, malformed face, deformed face, asymmetrical eyes, cross-eyed, misaligned eyes, swollen face, bad teeth, extra fingers, missing fingers, fused fingers, deformed hands, long neck, double face, duplicate face, plastic skin, wax skin, uncanny, jpeg artifacts, watermark, text, worst quality, low quality, out of focus, motion blur, cropped head, extra limbs, disconnected neck, anatomical nonsense, muddy skin texture","style_prefix":"portrait, head and shoulders, sharp eyes, natural skin texture","style_suffix":"correct facial symmetry, believable expression","width":896,"height":1152,"config_json":{}},"Landscape":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":18,"cfg":4.2,"negative_prompt":"bad perspective, warped horizon, duplicated mountains, melting terrain, floating rocks without intent, inconsistent scale, tiny figures with bad anatomy, extra limbs on people, malformed animals, jpeg artifacts, watermark, text, worst quality, low quality, muddy details, banding, chromatic aberration, oversharpened, amateur composition, incoherent vanishing point, duplicate elements","style_prefix":"landscape, atmospheric perspective, natural lighting, wide shot","style_suffix":"coherent depth, readable focal point","width":1152,"height":896,"config_json":{}},"Termek_foto":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":18,"cfg":4.0,"negative_prompt":"bad anatomy, deformed hands holding product, extra fingers, malformed limbs, floating product, warped product, duplicate products, melted plastic, wrong perspective, jpeg artifacts, watermark, text, worst quality, low quality, busy background, clutter, dirty lens, chromatic aberration, banding, amateur product shot, inconsistent shadows","style_prefix":"product photography, studio lighting, clean background, sharp focus","style_suffix":"accurate materials, correct scale","width":1024,"height":1024,"config_json":{}},"Sci-Fi":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate body parts, bad eyes, asymmetrical eyes, incoherent spacesuit seams, melting helmet, jpeg artifacts, watermark, text, worst quality, low quality, muddy metal, amateur, broken perspective, inconsistent scale, duplicate modules","style_prefix":"science fiction, detailed environment, cinematic lighting, coherent technology","style_suffix":"believable human scale, readable pose","width":1152,"height":896,"config_json":{}},"3D_CGI":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.4,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, low poly errors, z-fighting, broken normals, melted mesh, duplicate vertices chaos, uncanny rigging, clipping through body, jpeg artifacts, watermark, text, worst quality, low quality, flat shading where subsurface needed, amateur sculpt","style_prefix":"3d render, octane render style, clean materials, global illumination","style_suffix":"consistent topology look, believable proportions","width":1024,"height":1024,"config_json":{}},"Ink_comic":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":12,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, messy ink blobs, unreadable silhouette, jpeg artifacts, watermark, text, worst quality, low quality, muddy grays, broken panel composition, duplicate characters, asymmetrical face errors","style_prefix":"ink illustration, comic book, bold lines, selective blacks","style_suffix":"clear gesture, readable pose","width":1024,"height":1024,"config_json":{}},"nsfw":{"model":"zimageturbonsfw_45bf16diffusion_f16.ckpt","steps":20,"cfg":0.8,"negative_prompt":"child, minor, underage, school uniform suggestive minor, bad anatomy, bad proportions, malformed limbs, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, too many fingers, deformed hands, deformed feet, deformed face, deformed body, disproportionate limbs, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate body parts, worst quality, low quality, blurry, jpeg artifacts, watermark, signature, text, username, censored bar, mosaic censor, disfigured, mutation, extra heads","style_prefix":"adult subject, consenting context, coherent anatomy","style_suffix":"natural proportions, believable pose","width":1024,"height":1024,"config_json":{}}}'
+
+from typing import Any, AsyncIterator
+
+from pydantic import BaseModel, Field
+
+# Utasítás-szöveg levágása
+_PREFIX_RES = (
+    re.compile(
+        r"^\s*(generálj|készíts|rajzolj|mutass)(\s+egy)?\s+képet\s*([:\-–]\s*)?",
+        re.IGNORECASE | re.UNICODE,
+    ),
+    re.compile(
+        r"^\s*(generate|create|draw)(\s+an?\s+|\s+)(image|picture)\s*([:\-–]\s*)?",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _normalize_prompt_for_image(text: str) -> str:
+    t = text.strip()
+    if not t:
+        return t
+    orig = t
+    for rx in _PREFIX_RES:
+        t = rx.sub("", t, count=1)
+    t = t.strip()
+    return t if t else orig
+
+
+def _merge_style_into_prompt_core(style: str, theme: str, prompt_core: str) -> str:
+    """
+    style_label / téma hozzáfűzése — ne ismételje a stílus nevet, ha a prompt már ezzel kezdődik
+    (pl. JSON: style_label Anime + prompt „Anime …” → ne legyen „Anime\\n\\nAnime …”).
+    """
+    pc = (prompt_core or "").strip()
+    head: list[str] = []
+    if style:
+        s = style.strip()
+        if s:
+            pl = pc.lower()
+            sl = s.lower()
+            if not (pl.startswith(sl) or pl.startswith(sl + " ") or pl.startswith(sl + ",")):
+                head.append(s)
+    if theme:
+        t = (theme or "").strip()
+        if t:
+            head.append(t)
+    if not head:
+        return pc
+    return "\n\n".join(head + [pc]) if pc else "\n\n".join(head)
+
+
+_PHOTO_REAL_HINTS = re.compile(
+    r"(?i)(photorealistic|photo-real|realistic skin|dslr|shallow depth|documentary|raw photo|professional photography|imax\s+quality|8k\s*resolution|\b8k\b)"
+)
+
+
+def _user_wants_photorealistic(text: str) -> bool:
+    """A pozitív prompt fotó / realisztikus képet kér (nem anime illusztrációt)."""
+    return bool(_PHOTO_REAL_HINTS.search(text or ""))
+
+
+# Egyetlen „beszélgetés + kép” bejegyzés a modellválasztóban (nem konkrét .ckpt).
+PIPE_DEFAULT_MODEL_SENTINEL = "open_webui_pipe.drawthings_default"
+
+# Alap upscaler: Draw Things / közösségi „Universal” ESRGAN — jó kompromisszum minőség / sebesség; 2× scale a Valves-ban.
+_DEFAULT_UPSCALER_CKPT = "esrgan_4x_universal_upscaler_v2_sharp_f16.ckpt"
+
+
+def _resolve_ckpt_model(body: dict, fallback: str) -> str:
+    """
+    Open WebUI: `open_webui_pipe.z_image_turbo_1.0_q8p.ckpt` — csak a valódi fájlnév kell.
+    """
+    mid = (body.get("model") or "").strip()
+    if not mid:
+        return fallback
+    if PIPE_DEFAULT_MODEL_SENTINEL in mid or mid.rstrip("/").endswith("drawthings_default"):
+        return fallback
+    segs = mid.split(".")
+    if len(segs) >= 3 and segs[-1] == "ckpt":
+        first = segs[0].lower()
+        if first in ("open_webui_pipe", "pipe") or first.startswith("open_webui"):
+            return ".".join(segs[1:])
+    m = re.search(r"(?:^|[/.])([a-zA-Z0-9_][a-zA-Z0-9_.-]*\.ckpt)$", mid)
+    if m:
+        return m.group(1)
+    if mid.endswith(".ckpt"):
+        return mid.split("/")[-1].split("\\")[-1]
+    return fallback
+
+
+def _compose_prompt(
+    user_prompt: str,
+    valves: Any,
+    preset: dict[str, Any] | None = None,
+) -> str:
+    """Preset előtag/utótag (ha van), majd Valves STYLE_PREFIX/SUFFIX + user üzenet."""
+    u = user_prompt.strip()
+    ppre = (preset.get("style_prefix") or preset.get("prompt_prefix") or "").strip() if preset else ""
+    psuf = (preset.get("style_suffix") or preset.get("prompt_suffix") or "").strip() if preset else ""
+    pre = (getattr(valves, "STYLE_PREFIX", None) or "").strip()
+    suf = (getattr(valves, "STYLE_SUFFIX", None) or "").strip()
+    parts: list[str] = []
+    for x in (ppre, pre):
+        if x:
+            parts.append(x)
+    if u:
+        parts.append(u)
+    for x in (suf, psuf):
+        if x:
+            parts.append(x)
+    if not parts:
+        return u
+    return "\n\n".join(parts) if len(parts) > 1 else (parts[0] if parts else u)
+
+
+def _normalize_style_preset_key(s: str) -> str:
+    """
+    Preset kulcs összehasonlítás: szóköz és aláhúzás egyenértékű.
+    A varázsló listában a kulcs és az olvasható név — a `style_label` szóközzel vagy aláhúzással is egyezhet.
+    """
+    t = (s or "").strip().lower()
+    if not t:
+        return ""
+    return "_".join(t.replace("_", " ").split())
+
+
+# Gyakori elírás a varázsló JSON-ban (LLM / kézi): „nfsw” → nsfw preset
+_STYLE_LABEL_ALIASES: dict[str, str] = {
+    "nfsw": "nsfw",
+}
+
+
+def _match_style_preset(
+    presets: dict[str, Any],
+    style: str,
+    theme: str,
+    prompt_core: str,
+) -> tuple[str | None, dict[str, Any]]:
+    """
+    Kulcs → dict preset (model, cfg, steps, negative_prompt, config_json, …).
+    1) Pont egyezés: style_label normalizálva == kulcs normalizálva.
+    2) Kulcsszó: a kulcs része a „stílus + téma + prompt” szövegnek (mint NEGATIVE_BY_STYLE).
+    """
+    if not presets:
+        return None, {}
+    st_n = _normalize_style_preset_key(style or "")
+    st_n = _STYLE_LABEL_ALIASES.get(st_n, st_n)
+    if st_n:
+        for k, v in presets.items():
+            if not isinstance(v, dict):
+                continue
+            if _normalize_style_preset_key(str(k)) == st_n:
+                return str(k), v
+    blob = f"{style} {theme} {prompt_core}".lower()
+    for k, v in presets.items():
+        if not isinstance(v, dict):
+            continue
+        ks = str(k).lower().strip()
+        if len(ks) < 2:
+            continue
+        if ks in blob:
+            return str(k), v
+        ks_spaced = ks.replace("_", " ")
+        if len(ks_spaced.replace(" ", "")) >= 2 and ks_spaced in blob:
+            return str(k), v
+    return None, {}
+
+
+def _stream_connection_error_hint(base_url: str, exc: BaseException) -> str:
+    """httpx / SSE: All connection attempts failed — tipikus BRIDGE_URL / bridge nem fut."""
+    s = str(exc).lower()
+    if not any(
+        x in s
+        for x in (
+            "connection",
+            "failed",
+            "refused",
+            "unreachable",
+            "timed out",
+            "timeout",
+            "name or service not known",
+            "nodename nor servname",
+        )
+    ):
+        return ""
+    u = (base_url or "").rstrip("/")
+    return (
+        "\n\n---\n\n"
+        "**Mi ez?** Az Open WebUI szerver **nem éri el** a drawthings_bridge-et.\n\n"
+        f"- **BRIDGE_URL** most: `{u}` — fut-e a bridge? Teszt a **szerveren** (ahol az OWUI): `curl -sS {u}/health`\n"
+        "- Ha az OWUI **Dockerben / más gépen** van, a `127.0.0.1` **nem** a Mac — állítsd: `http://<Mac_LAN_IP>:8787`\n"
+        "- Ha csak a **stream** (SSE) bukik: próbáld **STREAM_PROGRESS** = **hamis** (egy sima `/generate` ugyanarra az URL-re).\n"
+    )
+
+
+def _apply_preset_model(preset: dict[str, Any], body: dict, fallback: str) -> str:
+    """Preset `model`: .ckpt fájlnév; felülírja a választóban lévő modellt."""
+    pm = (preset.get("model") or "").strip()
+    if not pm:
+        return _resolve_ckpt_model(body, fallback)
+    mid = pm if pm.endswith(".ckpt") else f"{pm}.ckpt"
+    return _resolve_ckpt_model({"model": f"open_webui_pipe.{mid}"}, mid)
+
+
+def _optional_config_json(valves: Any) -> dict[str, Any] | None:
+    raw = (getattr(valves, "CONFIG_JSON", None) or "").strip()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+_NON_ASCII = re.compile(r"[^\x00-\x7F]")
+
+
+def _translation_stack_available() -> bool:
+    try:
+        import langdetect  # noqa: F401
+        from deep_translator import GoogleTranslator  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def _ensure_english(text: str, enabled: bool) -> tuple[str, bool]:
+    """
+    Nem angol / bizonytalan nyelv → GoogleTranslator (auto→en).
+    A langdetect egy szavas / elgépelős szöveget tévesen „en”-nek jelölhet — detect_langs + küszöb.
+    """
+    if not enabled or not (text or "").strip():
+        return text, False
+    if not _translation_stack_available():
+        return text, False
+    t = text.strip()
+    if len(t) < 2:
+        return text, False
+    try:
+        from langdetect import detect_langs
+
+        langs = detect_langs(t)
+        if langs:
+            top = langs[0]
+            if top.lang == "en" and top.prob >= 0.82:
+                return text, False
+    except Exception:
+        pass
+    try:
+        from deep_translator import GoogleTranslator
+
+        out = GoogleTranslator(source="auto", target="en").translate(t)
+        if out and isinstance(out, str) and out.strip():
+            out = out.strip()
+            if out.casefold() == t.casefold():
+                return text, False
+            return out, True
+    except Exception:
+        pass
+    return text, False
+
+
+def _load_json_map(raw: str) -> dict[str, Any]:
+    s = (raw or "").strip()
+    if not s:
+        return {}
+    try:
+        o = json.loads(s)
+        return o if isinstance(o, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _deep_merge(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = dict(a)
+    for k, v in b.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+# Draw Things / JSGenerationConfiguration — wiki.drawthings.ai Sampler_Basics (0–18)
+_SAMPLER_NAMES: dict[int, str] = {
+    0: "DPM++ 2M Karras",
+    1: "Euler A",
+    2: "DDIM",
+    3: "UniPC",
+    4: "DPM++ SDE Karras",
+    5: "PLMS",
+    6: "LCM",
+    7: "Euler A Substep",
+    8: "DPM++ SDE Substep",
+    9: "TCD",
+    10: "Euler A Trailing",
+    11: "DPM++ SDE Trailing",
+    12: "DPM++ 2M AYS",
+    13: "Euler A AYS",
+    14: "DPM++ SDE AYS",
+    15: "DPM++ 2M Trailing",
+    16: "DDIM Trailing",
+    17: "UniPC Trailing",
+    18: "UniPC AYS",
+}
+
+
+def _clamp_steps_for_z_image_pipeline(
+    valves: Any,
+    model: str,
+    steps_val: int | None,
+) -> int | None:
+    """
+    z_image + refiner/hires/upscaler lánc alacsony lépésnél hibára futhat (CLI: „no tensors returned”).
+    Ha nincs explicit globális **STEPS** a Valves-ban, ilyenkor a lépésszám legalább Z_IMAGE_MIN_STEPS.
+    Egyszerű (csak UniPC) módnál nem kényszerítünk — a stílus preset lépése érvényesül.
+    """
+    if steps_val is None:
+        return None
+    if "z_image" not in (model or "").lower():
+        return steps_val
+    if not getattr(valves, "Z_IMAGE_PIPELINE_DEFAULTS", False):
+        return steps_val
+    if getattr(valves, "STEPS", None) is not None:
+        return steps_val
+    risky = bool(getattr(valves, "Z_IMAGE_REFINER_HIRES", False)) or bool(
+        (getattr(valves, "UPSCALER_CKPT", None) or "").strip()
+    )
+    if not risky:
+        return steps_val
+    raw = getattr(valves, "Z_IMAGE_MIN_STEPS", None)
+    if raw is None:
+        min_s = 12
+    else:
+        try:
+            min_s = int(float(raw))
+        except (TypeError, ValueError):
+            min_s = 12
+    if min_s < 1:
+        return steps_val
+    return max(int(steps_val), min_s)
+
+
+def _merge_upscaler_config(valves: Any, cfg_extra: dict[str, Any]) -> dict[str, Any]:
+    """UPSCALER_CKPT beállítva → `config_json`-ba (2× alapból), **Z_IMAGE_PIPELINE_DEFAULTS nélkül is**."""
+    upsc = (getattr(valves, "UPSCALER_CKPT", None) or "").strip()
+    if not upsc:
+        return cfg_extra
+    sf = float(getattr(valves, "UPSCALER_SCALE_FACTOR", None) or 2.0)
+    return _deep_merge(
+        cfg_extra,
+        {"upscaler": upsc, "upscalerScaleFactor": sf},
+    )
+
+
+def _apply_z_image_pipeline_defaults(
+    valves: Any,
+    model: str,
+    cfg_extra: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Ha **Z_IMAGE_PIPELINE_DEFAULTS** be van kapcsolva: **UniPC Trailing** (`sampler`: 17) + opcionális
+    refiner/hires/upscaler. **Alapból ki** — így a Pipe ugyanúgy küld, mint a `draw-things-cli generate`
+    **--config-json nélkül** (a CLI alap sampler / pipeline), ami a z_image **turbo** modellnél gyakran szebb.
+    A preset / CONFIG_JSON mezők felülírhatják (deep merge: user erősebb).
+    **Upscaler** külön: ha **UPSCALER_CKPT** meg van adva, mindig merge (pipeline ki mellett is).
+    """
+    if not getattr(valves, "Z_IMAGE_PIPELINE_DEFAULTS", False):
+        return _merge_upscaler_config(valves, cfg_extra)
+    m = (model or "").lower()
+    if "z_image" not in m:
+        return _merge_upscaler_config(valves, cfg_extra)
+    defaults: dict[str, Any] = {
+        "sampler": 17,
+    }
+    if getattr(valves, "Z_IMAGE_REFINER_HIRES", False):
+        rs = getattr(valves, "REFINER_START", None)
+        refiner_start = 0.75 if rs is None else float(rs)
+        defaults = {
+            **defaults,
+            "refinerModel": model,
+            "refinerStart": refiner_start,
+            "hiresFix": True,
+        }
+    out = _deep_merge(defaults, cfg_extra)
+    return _merge_upscaler_config(valves, out)
+
+
+def _extract_user_content(m: dict[str, Any]) -> str:
+    c = m.get("content")
+    if isinstance(c, str):
+        return c.strip()
+    if isinstance(c, list):
+        parts: list[str] = []
+        for block in c:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text") or "")
+        return "".join(parts).strip()
+    return ""
+
+
+def _last_user_text(body: dict) -> str:
+    messages = body.get("messages") or []
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            return _extract_user_content(m)
+    return ""
+
+
+def _iter_user_messages_chronological(body: dict) -> list[str]:
+    out: list[str] = []
+    for m in body.get("messages") or []:
+        if m.get("role") == "user":
+            t = _extract_user_content(m)
+            if t:
+                out.append(t)
+    return out
+
+
+def _all_user_text_for_intent(body: dict) -> str:
+    """Összes user üzenet egy szövegben — képkérést korábbi üzenetben is észleljük."""
+    return "\n".join(_iter_user_messages_chronological(body))
+
+
+def _normalize_for_image_intent_match(s: str) -> str:
+    """
+    Billentyűzet / IME eltérések (pl. német „generälj”, „kepet” ékezet nélkül),
+    hogy ne essen el az IMAGE_REQUEST_REGEX találat.
+    """
+    if not s:
+        return s
+    t = re.sub(r"generälj", "generálj", s, flags=re.IGNORECASE)
+    t = re.sub(r"generäld", "generáld", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?i)\bkepet\b", "képet", t)
+    return t
+
+
+_WIZARD_EMPTY_LLM_REPLY_HU = (
+    "**Üres válasz érkezett a modelltől.** "
+    "Gyakori ok: beépített tartalmi szűrő (pl. NSFW), vagy a modell nem adott szöveget. "
+    "Próbálj más modellt / LM Studio beállítást; felnőtt témához a preset listában a **nsfw** kulcsot add meg a varázsló JSON `style_label` mezőben. "
+    "Ha ismétlődik: nézd a LM Studio / Ollama konzolt."
+)
+
+
+def _explicit_image_intent_ok(
+    valves: Any,
+    body: dict,
+    raw_text: str,
+    json_ready: bool,
+    tre: Any,
+) -> bool:
+    """
+    Ha REQUIRE_EXPLICIT_IMAGE_REQUEST: csak akkor engedélyezett a közvetlen generálás,
+    ha van explicit képkérés (regex), vagy már van JSON / trigger szó.
+    """
+    if not getattr(valves, "REQUIRE_EXPLICIT_IMAGE_REQUEST", True):
+        return True
+    if json_ready:
+        return True
+    if tre and raw_text and tre.search(raw_text):
+        return True
+    rx = (getattr(valves, "IMAGE_REQUEST_REGEX", None) or "").strip()
+    if not rx:
+        return True
+    try:
+        cre = re.compile(rx, re.IGNORECASE | re.UNICODE)
+    except re.error:
+        return True
+    blob = _normalize_for_image_intent_match(
+        (_all_user_text_for_intent(body) or raw_text or "").strip()
+    )
+    return bool(cre.search(blob))
+
+
+def _wizard_entry_allowed(
+    valves: Any,
+    body: dict,
+    raw_text: str,
+    json_ready: bool,
+    tre: Any,
+) -> bool:
+    """
+    REQUIRE_EXPLICIT_IMAGE_REQUEST esetén a varázsló LLM csak akkor fusson, ha ugyanaz a feltétel
+    teljesül, mint a közvetlen generálásnál: explicit képkérés **bármely** user üzenetben a szálban
+    (`IMAGE_REQUEST_REGEX` + `_all_user_text_for_intent`), vagy trigger a legutóbbi üzeneten, vagy json_ready.
+
+    Nem elég „már volt assistant válasz”: különben egy általános chat után a második user üzenet
+    véletlenül a kép-varázsló system promptját kapná.
+    """
+    if not getattr(valves, "REQUIRE_EXPLICIT_IMAGE_REQUEST", True):
+        return True
+    return _explicit_image_intent_ok(valves, body, raw_text, json_ready, tre)
+
+
+def _merged_user_text_for_parse(
+    body: dict,
+    trigger_regex: str,
+    merge_short: bool,
+) -> str:
+    """
+    Ha csak „KÉSZ MEHET” jön egy rövid üzenetben, fűzd hozzá az előző user szövegeket
+    (hogy a Gemma-blokk az előző üzenetben maradhasson).
+    """
+    users = _iter_user_messages_chronological(body)
+    if not users:
+        return ""
+    last = users[-1]
+    if not merge_short or not trigger_regex.strip():
+        return last
+    try:
+        tre = re.compile(trigger_regex, re.IGNORECASE | re.UNICODE)
+    except re.error:
+        return last
+    if not tre.search(last):
+        return last
+    stripped = tre.sub("", last).strip()
+    if len(stripped) >= 48:
+        return last
+    prev = users[:-1]
+    if not prev:
+        return last
+    return "\n\n---\n\n".join(prev + [last])
+
+
+def _parse_size(s: str) -> tuple[int | None, int | None]:
+    m = re.search(r"(\d+)\s*[x×]\s*(\d+)", s or "", re.IGNORECASE)
+    if not m:
+        return None, None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _resolve_dim(val: Any, fallback: int | None) -> int | None:
+    if val is None:
+        return fallback
+    if isinstance(val, (int, float)):
+        return int(val)
+    if isinstance(val, str) and val.strip().isdigit():
+        return int(val.strip())
+    return fallback
+
+
+def _resolve_optional_int(val: Any, fallback: int | None) -> int | None:
+    if val is None:
+        return fallback
+    if isinstance(val, bool):
+        return fallback
+    if isinstance(val, (int, float)):
+        return int(val)
+    if isinstance(val, str) and val.strip():
+        s = val.strip()
+        if s.lstrip("-").isdigit():
+            return int(s)
+    return fallback
+
+
+def _resolve_optional_float(val: Any, fallback: float | None) -> float | None:
+    if val is None:
+        return fallback
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str) and val.strip():
+        s = val.strip().replace(",", ".")
+        try:
+            return float(s)
+        except ValueError:
+            pass
+    return fallback
+
+
+def _strip_none_payload(d: dict[str, Any]) -> dict[str, Any]:
+    """A bridge / CLI ne kapjon explicit `null` lépés/CFG-hez — maradjon a modell ajánlása."""
+    return {k: v for k, v in d.items() if v is not None}
+
+
+def _format_generation_params_md(
+    *,
+    model: str,
+    width: int | None,
+    height: int | None,
+    steps: int | None,
+    cfg: float | None,
+    seed: int | None,
+    neg: str,
+    show: bool,
+    preset_label: str | None = None,
+    config_json: dict[str, Any] | None = None,
+) -> str:
+    if not show:
+        return ""
+    neg_disp = (neg or "").strip()
+    if len(neg_disp) > 600:
+        neg_disp = neg_disp[:600] + "…"
+    lines = [
+        "### Draw Things — beállítások",
+        "",
+        f"- **Checkpoint (.ckpt):** `{model}`",
+    ]
+    if preset_label:
+        lines.append(f"- **Stílus preset:** `{preset_label}`")
+    lines += [
+        f"- **Méret:** {width}×{height}"
+        if (width and height)
+        else "- **Méret:** *(alapértelmezés / modell)*",
+        f"- **Steps:** {steps}"
+        if steps is not None
+        else "- **Steps:** *(nincs megadva — a modell/CLI ajánlott értéke; állítsd a Valves **STEPS**, a **STYLE_PRESETS_JSON**, vagy a JSON `steps` mezőt)*",
+        f"- **CFG (guidance):** {cfg}"
+        if cfg is not None
+        else "- **CFG:** *(nincs megadva — Valves **CFG**, **STYLE_PRESETS_JSON**, vagy JSON `cfg` / `guidanceScale`)*",
+        f"- **Seed:** {seed}" if seed is not None else "- **Seed:** véletlen",
+        "- **Negatív prompt:** "
+        + (f"`{neg_disp}`" if neg_disp else "*(üres)*"),
+    ]
+    cj = config_json or {}
+    if cj.get("sampler") is not None:
+        try:
+            sid = int(cj["sampler"])
+            sn = _SAMPLER_NAMES.get(sid, f"#{sid}")
+        except (TypeError, ValueError):
+            sn = str(cj["sampler"])
+            sid = cj["sampler"]
+        lines.append(f"- **Sampler:** {sn} (`sampler`: {sid})")
+    if (cj.get("refinerModel") or "").strip():
+        lines.append(
+            f"- **Refiner modell:** `{cj['refinerModel']}` · **refinerStart:** {cj.get('refinerStart', '—')}"
+        )
+    if "hiresFix" in cj:
+        lines.append(
+            "- **High resolution fix (z_image):** "
+            + ("be (`hiresFix`: true)" if cj.get("hiresFix") else "ki")
+        )
+    if (cj.get("upscaler") or "").strip():
+        lines.append(
+            f"- **Upscaler (opcionális):** `{cj['upscaler']}` · **scale:** {cj.get('upscalerScaleFactor', '—')}"
+        )
+    elif cj.get("hiresFix"):
+        lines.append(
+            "- **Upscaler:** *nincs megadva* — opcionális (külön a HR fix-től); ha van ESRGAN/Universal .ckpt a Models mappában, add meg a **UPSCALER_CKPT** Valves-ban."
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _strip_markdown_json_fence(text: str) -> str:
+    t = text.strip()
+    if not t.startswith("```"):
+        return text
+    lines = t.splitlines()
+    if not lines:
+        return text
+    if lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def _try_parse_json_object(text: str) -> dict[str, Any] | None:
+    """
+    JSON kinyerése: a ```json … ``` regex **nem** jó (az első `}`-nél megáll).
+    json.JSONDecoder().raw_decode a teljes objektumot parse-olja.
+    """
+    candidates = [text, _strip_markdown_json_fence(text)]
+    dec = json.JSONDecoder()
+    for blob in candidates:
+        if not blob or "{" not in blob:
+            continue
+        start = 0
+        while True:
+            i = blob.find("{", start)
+            if i < 0:
+                break
+            try:
+                obj, _end = dec.raw_decode(blob[i:])
+                if isinstance(obj, dict) and (
+                    "prompt" in obj
+                    or "negative_prompt" in obj
+                    or ("width" in obj and "height" in obj)
+                ):
+                    return obj
+            except json.JSONDecodeError:
+                pass
+            start = i + 1
+    return None
+
+
+def _is_ready_generate_json(text: str) -> bool:
+    """Van-e parse-olható Draw Things JSON (trigger nélkül is indulhat)."""
+    j = _try_parse_json_object(text)
+    if not j:
+        return False
+    return bool((j.get("prompt") or "").strip())
+
+
+_KV_HEADER = re.compile(
+    r"^\s*(Stílus|Style|Téma|Theme|Méret|Size|Prompt|Negatív|Negative|LoRA|Lora)\s*:\s*(.*)$",
+    re.IGNORECASE,
+)
+
+
+def _parse_kv_lines(text: str) -> dict[str, Any]:
+    """Soronkénti kulcs: érték + többsoros Prompt."""
+    lines = text.splitlines()
+    i = 0
+    out: dict[str, Any] = {}
+    while i < len(lines):
+        m = _KV_HEADER.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        label = m.group(1).lower()
+        rest = (m.group(2) or "").strip()
+        key = {
+            "stílus": "style",
+            "style": "style",
+            "téma": "theme",
+            "theme": "theme",
+            "méret": "size",
+            "size": "size",
+            "prompt": "prompt",
+            "negatív": "negative",
+            "negative": "negative",
+            "lora": "lora",
+        }.get(label, label)
+        if key == "prompt" and not rest:
+            j = i + 1
+            buf: list[str] = []
+            while j < len(lines):
+                if _KV_HEADER.match(lines[j]):
+                    break
+                buf.append(lines[j])
+                j += 1
+            out["prompt"] = "\n".join(buf).strip()
+            i = j
+            continue
+        if key == "size":
+            w, h = _parse_size(rest)
+            if w:
+                out["width"] = w
+            if h:
+                out["height"] = h
+        elif key in ("negative", "lora"):
+            out[key] = rest
+        else:
+            out[key] = rest
+        i += 1
+    return out
+
+
+def _parse_user_bundle(text: str) -> dict[str, Any]:
+    """JSON blokk vagy kulcssorok + maradék = prompt."""
+    j = _try_parse_json_object(text)
+    if j:
+        o: dict[str, Any] = dict(j)
+        if "size" in o and isinstance(o["size"], str):
+            w, h = _parse_size(o["size"])
+            if w:
+                o["width"] = o.get("width") or w
+            if h:
+                o["height"] = o.get("height") or h
+        return o
+    kv = _parse_kv_lines(text)
+    if kv:
+        return kv
+    return {}
+
+
+def _map_fragments(hint_map: dict[str, Any], *bags: str) -> list[str]:
+    """Ha a kulcs (kisbetű) benne van bármelyik bag szövegben, a hozzá tartozó stringet hozzáadja."""
+    blob = " ".join(bags).lower()
+    fr: list[str] = []
+    for k, v in hint_map.items():
+        if not isinstance(v, str) or not v.strip():
+            continue
+        ks = str(k).lower()
+        if len(ks) < 2:
+            continue
+        if ks in blob:
+            fr.append(v.strip())
+    return fr
+
+
+def _config_for_style(lora_map: dict[str, Any], style: str, theme: str, prompt: str) -> dict[str, Any]:
+    """LORA_BY_STYLE_JSON: kulcs → részleges dict; első találat deep merge."""
+    bag = f"{style} {theme} {prompt}".lower()
+    merged: dict[str, Any] = {}
+    for k, v in lora_map.items():
+        if not isinstance(v, dict):
+            continue
+        if str(k).lower() in bag:
+            merged = _deep_merge(merged, v)
+    return merged
+
+
+def _help_trigger_hu(valves: Any | None = None) -> str:
+    wiz = valves and _wizard_ollama_enabled(valves)
+    wiz_line = ""
+    if wiz:
+        wiz_line = (
+            "**Varázsló mód be van kapcsolva:** ugyanabban a körben az **Ollama** beszélgetik veled, "
+            "majd a válaszban lévő **JSON** után automatikusan indul a Draw Things — nem kell külön szöveges modellre váltani. "
+            "Ha csak szöveget kapsz kép nélkül, a modellnek a ```json … ``` blokkot is ki kell adnia (lásd system prompt).\n\n"
+        )
+    return (
+        "### Képgenerálás — trigger szükséges\n\n"
+        + wiz_line
+        + "**Fontos:** a képhez a chatben a **Pipe / Draw Things** modellt kell választani (a normál LLM nem hívja a bridge-et). "
+        "Illeszd be a JSON-t vagy **KÉSZ MEHET** (a **TRIGGER_REGEX** szerint).\n\n"
+        "A fő chatben egyeztess: **stílus**, **méret**, **prompt**. "
+        "Ezután a Pipe-ban: **```json … ```** blokk `prompt` mezővel = **trigger nélkül is indul** (ha `TRIGGER_MODE=required`).\n\n"
+        "Vagy szövegesen, majd:\n\n"
+        "**`KÉSZ MEHET`** (vagy `MEHET`, `INDÍTS`, `GO` — a Valves **TRIGGER_REGEX** szerint)\n\n"
+        "Példa:\n\n"
+        "```text\n"
+        "Stílus: vízfesték, puha kontúr\n"
+        "Téma: őszi erdő, köd\n"
+        "Méret: 1024x1024\n"
+        "Prompt:\n"
+        "Egy kis híd a patak felett, reggeli fény\n\n"
+        "KÉSZ MEHET\n"
+        "```\n\n"
+        "Vagy egy JSON blokk ```json … ``` a `prompt`, `negative_prompt`, `width`, `height` mezőkkel."
+    )
+
+
+def _raw_percent_from_payload(
+    percent: float | None,
+    current: int | None,
+    total: int | None,
+) -> float:
+    """Egy eseményből becsült 0..1; a sampling lépés és az UI% közül a nagyobb."""
+    a = 0.0
+    if percent is not None:
+        a = max(a, max(0.0, min(1.0, float(percent))))
+    if current is not None and total is not None and total > 0:
+        a = max(a, max(0.0, min(1.0, current / total)))
+    return a
+
+
+def _progress_eta_suffix(percent_0_1: float, t0: float | None) -> str:
+    """Egyszerű ETA: eltelt idő és % alapján (lineáris becslés)."""
+    if t0 is None:
+        return ""
+    p = max(0.0, min(1.0, float(percent_0_1)))
+    if p <= 0.03 or p >= 0.998:
+        return ""
+    elapsed = time.monotonic() - t0
+    if elapsed < 0.35:
+        return ""
+    eta = elapsed * (1.0 - p) / max(p, 0.03)
+    if eta > 7200 or eta < 1.5:
+        return ""
+    if eta < 120:
+        return f" · *~{int(eta)} s hátra (becsült)*"
+    m, s = int(eta // 60), int(eta % 60)
+    return f" · *~{m} p {s} mp hátra (becsült)*"
+
+
+def _stream_started_placeholder_md(valves: Any, summary_prefix: str) -> str:
+    """Open WebUI emitter: azonnali tartalom — ne legyen üres a buborék az első SSE előtt."""
+    hint = (
+        "**A kérés a bridge felé ment — a generálás elindult.**  \n"
+        "*A részletes % és lépés a CLI kimenetétől függ; ha sokáig nem mozdul: "
+        "`DRAWTHINGS_BRIDGE_NO_SCRIPT=0` a Mac bridge környezetében.*\n\n"
+    )
+    ring = _progress_for_valves(
+        valves,
+        percent_0_1=0.02,
+        current=None,
+        total=None,
+        line="",
+        include_title=False,
+    )
+    body = "### Képgenerálás\n\n" + hint + ring
+    if summary_prefix:
+        return summary_prefix + "\n\n" + body
+    return body
+
+
+def _stream_waiting_cli_placeholder_md(valves: Any, summary_prefix: str) -> str:
+    """Még nincs progress SSE — heartbeat, hogy ne tűnjön lefagynak a chat."""
+    hint = (
+        "**A bridge fut — várakozás a draw-things-cli első haladására.**  \n"
+        "*Ha ez sokáig így marad, a kimenet pufferezhet (macOS: `DRAWTHINGS_BRIDGE_NO_SCRIPT=0`).*\n\n"
+    )
+    ring = _progress_for_valves(
+        valves,
+        percent_0_1=0.08,
+        current=None,
+        total=None,
+        line="",
+        include_title=False,
+    )
+    body = "### Képgenerálás\n\n" + hint + ring
+    if summary_prefix:
+        return summary_prefix + "\n\n" + body
+    return body
+
+
+def _sync_generation_wait_md(valves: Any) -> str:
+    """
+    Szinkron `/generate` előtt: a felhasználó lássa, hogy **történik valami** (a POST blokkolhat percekig).
+    """
+    hint = (
+        "**A bridge megkapta a kérést — a draw-things-cli most fut a Macen.**  \n"
+        "*Ez a nézet addig marad, amíg a kép elkészül (akár több perc is lehet). Ne zárd be a lapot.*  \n"
+        "*Élő %-os haladás: kapcsold **STREAM_PROGRESS**-t; Mac bridge: `DRAWTHINGS_BRIDGE_NO_SCRIPT=0` (lásd `run_bridge.sh`).*\n\n"
+    )
+    ring = _progress_for_valves(
+        valves,
+        percent_0_1=0.12,
+        current=None,
+        total=None,
+        line="szinkron mód — várakozás a kész PNG-re…",
+        include_title=False,
+    )
+    return "### Képgenerálás folyamatban\n\n" + hint + ring
+
+
+def _phase_from_line(line: str) -> str:
+    """Egy rövid fázis-szöveg: ha több kulcsszó van ugyanabban a sorban (CLI / régi bridge), a legutolsót vesszük."""
+    short = (line or "").strip().replace("\n", " ")
+    if not short:
+        return ""
+    best_idx = -1
+    for key in ("Finishing", "Sampling", "Processing", "Starting"):
+        idx = short.rfind(key)
+        if idx > best_idx:
+            best_idx = idx
+    if best_idx >= 0:
+        return short[best_idx :][:72]
+    return short[:72]
+
+
+def _progress_ring_markdown(
+    *,
+    percent_0_1: float,
+    current: int | None,
+    total: int | None,
+    line: str,
+    include_title: bool = False,
+    eta_suffix: str = "",
+) -> str:
+    """Kompakt SVG gyűrű (kék) + markdown felirat (OWUI gyakran nem rendereli jól a **-t HTML <p>-ben)."""
+    p = max(0.0, min(1.0, float(percent_0_1)))
+    pct = int(round(p * 100))
+    # Kis %-nál az ív egyébként láthatatlan — minimum ívhossz a gyűrűn (a százalék szöveg a valós p)
+    p_arc = max(p, 0.04) if p > 0 else 0.0
+    p_arc = min(1.0, p_arc)
+    r, cx, cy = 20, 28, 28
+    circ = 2 * math.pi * r
+    off = circ * (1.0 - p_arc)
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56" viewBox="0 0 56 56">'
+        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="#e5e7eb" stroke-width="5"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="#2563eb" stroke-width="5" '
+        f'stroke-linecap="round" transform="rotate(-90 {cx} {cy})" '
+        f'stroke-dasharray="{circ:.4f}" stroke-dashoffset="{off:.4f}"/>'
+        f'<text x="{cx}" y="{cy+6}" text-anchor="middle" font-size="13" font-weight="600" '
+        f'fill="#2563eb" font-family="system-ui,-apple-system,sans-serif">{pct}%</text>'
+        f"</svg>"
+    )
+    b64 = base64.standard_b64encode(svg.encode("utf-8")).decode("ascii")
+    step = ""
+    if current is not None and total is not None:
+        step = f" · **{current}/{total}**"
+    phase = _phase_from_line(line)
+    cap = f"**{pct}%**{step}"
+    if phase:
+        cap += f" · *{phase}*"
+    if eta_suffix:
+        cap += eta_suffix
+    title = "### Képgenerálás\n\n" if include_title else ""
+    return (
+        title
+        + f"![generálás](data:image/svg+xml;base64,{b64})\n\n"
+        + cap
+        + "\n\n"
+    )
+
+
+def _progress_block(
+    *,
+    percent_0_1: float,
+    current: int | None,
+    total: int | None,
+    line: str,
+    width: int = 20,
+    include_title: bool = False,
+    eta_suffix: str = "",
+) -> str:
+    """Régi ASCII sáv (STREAM_PROGRESS_UI=bar)."""
+    p = max(0.0, min(1.0, float(percent_0_1)))
+    filled = int(round(p * width))
+    pct_txt = f"{p * 100:.0f}%"
+    step = ""
+    if current is not None and total is not None:
+        step = f" · **{current}/{total}**"
+    phase = _phase_from_line(line)
+    title = "### Képgenerálás\n\n" if include_title else ""
+    top = "▒" * width
+    inner = "▓" * filled + "░" * (width - filled)
+    box = (
+        f"`{top}`\n"
+        f"`▓{inner}▓` **{pct_txt}**{step}\n"
+        f"`{top}`\n"
+    )
+    tail = (f"\n*{phase}*" if phase else "") + (eta_suffix + "\n" if eta_suffix else "\n")
+    return title + box + tail
+
+
+def _progress_for_valves(
+    valves: Any,
+    *,
+    percent_0_1: float,
+    current: int | None,
+    total: int | None,
+    line: str,
+    include_title: bool,
+    eta_suffix: str = "",
+) -> str:
+    ui = (getattr(valves, "STREAM_PROGRESS_UI", None) or "ring").strip().lower()
+    if ui in ("bar", "ascii", "legacy"):
+        return _progress_block(
+            percent_0_1=percent_0_1,
+            current=current,
+            total=total,
+            line=line,
+            include_title=include_title,
+            eta_suffix=eta_suffix,
+        )
+    return _progress_ring_markdown(
+        percent_0_1=percent_0_1,
+        current=current,
+        total=total,
+        line=line,
+        include_title=include_title,
+        eta_suffix=eta_suffix,
+    )
+
+
+async def _owui_emit_replace(emitter: Any, content: str) -> bool:
+    """Open WebUI: ugyanabban az asszisztens buborékban cserél (nem új yield-sor)."""
+    if emitter is None:
+        return False
+    try:
+        r = emitter({"type": "replace", "data": {"content": content}})
+        if hasattr(r, "__await__"):
+            await r
+    except Exception:
+        return False
+    return True
+
+
+async def _iter_sse_events(
+    url: str,
+    payload: dict[str, Any],
+    timeout_s: float = 3600.0,
+) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+    """SSE: (event_name, parsed_json) párok; a `data` sor JSON-ját parse-olja."""
+    import httpx
+
+    event_name: str | None = None
+    data_lines: list[str] = []
+
+    def _flush() -> tuple[str, dict[str, Any]] | None:
+        nonlocal event_name, data_lines
+        if not data_lines:
+            event_name = None
+            return None
+        raw = "\n".join(data_lines)
+        data_lines = []
+        ev = event_name or "message"
+        event_name = None
+        try:
+            obj = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            obj = {"_raw": raw[:500]}
+        return ev, obj
+
+    timeout = httpx.Timeout(timeout_s, connect=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if line is None:
+                    continue
+                if line == "":
+                    pair = _flush()
+                    if pair is not None:
+                        yield pair[0], pair[1]
+                    continue
+                if line.startswith(":"):
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+
+            pair = _flush()
+            if pair is not None:
+                yield pair[0], pair[1]
+
+
+def _resolved_style_presets_for_wizard(valves: Any) -> dict[str, Any]:
+    """Ugyanaz a preset-forrás, mint a generálásnál (üres Valves → beágyazott JSON)."""
+    raw_sp = (getattr(valves, "STYLE_PRESETS_JSON", None) or "").strip()
+    if not raw_sp or raw_sp == "{}":
+        raw_sp = _EMBEDDED_STYLE_PRESETS_JSON
+    return _load_json_map(raw_sp)
+
+
+def _style_preset_list_for_wizard_prompt(valves: Any) -> str:
+    """Összes preset kulcs felsorolása — a varázsló LLM a teljes listát kapja."""
+    presets = _resolved_style_presets_for_wizard(valves)
+    keys = sorted(
+        (str(k) for k, v in presets.items() if isinstance(v, dict)),
+        key=lambda s: s.casefold(),
+    )
+    if not keys:
+        return (
+            "(Nincs érvényes preset — nézd meg a Valves **STYLE_PRESETS_JSON** mezőt; "
+            "üres `{}` esetén a Pipe beágyazott listája kellene betöltődjön.)"
+        )
+    # Pontos JSON-kulcsok (aláhúzás), + olvasható név — a `style_label` szóközzel vagy aláhúzással is egyezhet.
+    return "\n".join(
+        f"- `{k}` — {k.replace('_', ' ')}" for k in keys
+    )
+
+
+def _load_wizard_system_prompt(valves: Any) -> str:
+    raw = (getattr(valves, "WIZARD_SYSTEM_PROMPT", None) or "").strip()
+    base = raw if raw else _EMBEDDED_WIZARD_SYSTEM_PROMPT_HU
+    inject = _style_preset_list_for_wizard_prompt(valves)
+    if "{{STYLE_PRESET_LIST}}" in base:
+        return base.replace("{{STYLE_PRESET_LIST}}", inject)
+    if raw:
+        return (
+            base
+            + "\n\n## Stílus-presetek (Pipe — sorold fel mindegyiket a kérdezéskor)\n\n"
+            + inject
+        )
+    return base
+
+
+def _load_general_chat_system_prompt(valves: Any) -> str:
+    raw = (getattr(valves, "GENERAL_CHAT_SYSTEM_PROMPT", None) or "").strip()
+    if raw:
+        return raw
+    return _EMBEDDED_GENERAL_CHAT_SYSTEM_PROMPT_HU
+
+
+def _owui_messages_for_ollama(body: dict, system: str) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    if system.strip():
+        out.append({"role": "system", "content": system.strip()})
+    for m in body.get("messages") or []:
+        if m.get("role") not in ("user", "assistant"):
+            continue
+        t = _extract_user_content(m)
+        if not t.strip():
+            continue
+        out.append({"role": str(m["role"]), "content": t})
+    return out
+
+
+def _wizard_ollama_enabled(valves: Any) -> bool:
+    return bool(
+        getattr(valves, "WIZARD_OLLAMA_CHAT", False)
+        and (getattr(valves, "OLLAMA_BASE_URL", "") or "").strip()
+        and (getattr(valves, "OLLAMA_MODEL", "") or "").strip()
+    )
+
+
+def _llm_translate_available(valves: Any) -> bool:
+    """Van beállítva Ollama/LM Studio modell — LLM-mel lehet fordítani pip nélkül."""
+    return bool(
+        (getattr(valves, "OLLAMA_BASE_URL", None) or "").strip()
+        and (getattr(valves, "OLLAMA_MODEL", None) or "").strip()
+    )
+
+
+def _parse_wizard_base_and_key(valves: Any) -> tuple[str, str]:
+    """
+    OLLAMA_BASE_URL mezőbe gyakran bemásolnak kulcsot is (szóközzel elválasztva).
+    Vissza: (tiszta base URL, API kulcs vagy üres).
+    """
+    raw = (getattr(valves, "OLLAMA_BASE_URL", "") or "").strip()
+    explicit = (getattr(valves, "WIZARD_API_KEY", "") or "").strip()
+    if not raw:
+        return "", explicit
+    parts = raw.split()
+    url = parts[0].strip().rstrip("/").rstrip(".")
+    key = explicit
+    if not key and len(parts) > 1:
+        rest = " ".join(parts[1:]).strip()
+        if rest.startswith("sk-") or rest.startswith("lm-") or len(rest) >= 16:
+            key = rest
+    return url, key
+
+
+def _resolve_openai_api_key(valves: Any, key_from_url: str) -> str:
+    """
+    LM Studio: kötelező Bearer token minden /v1/* híváshoz.
+    Sorrend: Valves → URL után másolt kulcs → környezet (OWUI szerveren).
+    """
+    for candidate in (
+        (getattr(valves, "WIZARD_API_KEY", None) or "").strip(),
+        (key_from_url or "").strip(),
+        (os.environ.get("LM_API_TOKEN") or "").strip(),
+        (os.environ.get("LMSTUDIO_API_KEY") or "").strip(),
+        (os.environ.get("OPENAI_API_KEY") or "").strip(),
+    ):
+        if candidate:
+            return candidate
+    return ""
+
+
+def _canonical_openai_base(base_url: str) -> str:
+    """
+    LM Studio: OpenAI-kompatibilis bázis általában ...:1234/v1 (nem .../api/v1).
+    """
+    u = base_url.rstrip("/").rstrip(".")
+    if re.search(r"/api/v1$", u):
+        return re.sub(r"/api/v1$", "/v1", u)
+    return u
+
+
+def _lm_studio_url_port_hint(base_raw: str) -> str:
+    """
+    Gyakori hiba: DDNS / domain + `/v1` port nélkül → a böngésző/httpx a :80-ra megy;
+    LM Studio alapból :1234-en hallgat (kivéve reverse proxy).
+    """
+    s = (base_raw or "").strip()
+    if not s or ":1234" in s:
+        return ""
+    try:
+        u = urlparse(s if "://" in s else f"http://{s}")
+    except Exception:
+        return ""
+    path = (u.path or "").lower()
+    if "/v1" not in path and not s.rstrip("/").lower().endswith("/v1"):
+        return ""
+    if (u.hostname or "") in ("127.0.0.1", "localhost", "::1"):
+        return ""
+    if u.port is not None:
+        return ""
+    if u.scheme == "http":
+        return (
+            " **Tip:** Port nélkül ez a cím a **:80**-ra megy. LM Studio alapból "
+            "**`http://<cím>:1234/v1`** — a routeren továbbítsd a **1234**-et a Macre, "
+            "és az OWUI Valves-ban is add meg a **:1234**-et (nem elég a `…ddns.net/v1`)."
+        )
+    if u.scheme == "https":
+        return (
+            " **Tip:** HTTPS `:443` — ha nincs nginx/Caddy proxy az LM Studio elé, "
+            "próbáld **`http://<cím>:1234/v1`** (LM Studio helyi szerver)."
+        )
+    return ""
+
+
+def _coerce_wizard_backend_from_url(base_raw: str, backend: str) -> str:
+    """
+    Ha a Valves-ban még „ollama” az alap, de az URL LM Studio / OpenAI-kompatibilis (:1234 vagy /v1),
+    automatikusan openai — különben /api/chat-ra megy és elszáll a kapcsolat.
+    """
+    b = (backend or "ollama").strip().lower()
+    if b not in ("ollama", "openai"):
+        b = "ollama"
+    if b != "ollama":
+        return b
+    u = base_raw or ""
+    ul = u.lower()
+    if "/v1" in ul or ":1234" in u:
+        return "openai"
+    return "ollama"
+
+
+async def _async_stream_wizard_llm(
+    valves: Any,
+    body: dict,
+    sys_p: str,
+) -> AsyncIterator[str]:
+    """
+    Ugyanaz a varázsló backend / OLLAMA_MODEL, mint a kép-varázslónál — csak a system prompt más.
+    Hiba esetén egyetlen hibaüzenetet streamel.
+    """
+    omsgs = _owui_messages_for_ollama(body, sys_p)
+    if not omsgs:
+        return
+    base_raw, key_from_url = _parse_wizard_base_and_key(valves)
+    api_key = _resolve_openai_api_key(valves, key_from_url)
+    backend = (getattr(valves, "WIZARD_CHAT_BACKEND", None) or "ollama").strip().lower()
+    if backend not in ("ollama", "openai"):
+        backend = "ollama"
+    backend = _coerce_wizard_backend_from_url(base_raw, backend)
+    model = (getattr(valves, "OLLAMA_MODEL", None) or "").strip()
+    if backend == "openai" and not api_key:
+        yield (
+            "**LM Studio API token hiányzik.** A szerver minden kérést elutasít token nélkül. "
+            "Állítsd be a **WIZARD_API_KEY** mezőt (Local Server → API key), vagy az Open WebUI-t futtató gépen: "
+            "`export LM_API_TOKEN='sk-lm-…'` (és indítsd újra az OWUI-t). "
+            "Teszt: `curl -sS -H \"Authorization: Bearer $LM_API_TOKEN\" "
+            f"{base_raw or 'http://127.0.0.1:1234/v1'}/models`"
+        )
+        return
+    try:
+        if backend == "openai":
+            async for ch in _stream_openai_compatible_chat(
+                base_raw,
+                model,
+                omsgs,
+                api_key or None,
+            ):
+                yield ch
+        else:
+            async for ch in _stream_ollama_chat(
+                base_raw,
+                model,
+                omsgs,
+            ):
+                yield ch
+    except Exception as e:
+        hint = ""
+        if backend == "openai":
+            hint = (
+                " Ellenőrizd: **WIZARD_API_KEY** / **LM_API_TOKEN**, és hogy az OWUI **szerver** (nem a böngésző) "
+                f"eléri-e: `{base_raw or '?'}`."
+            ) + _lm_studio_url_port_hint(base_raw)
+        else:
+            hint = (
+                " Ellenőrizd: Ollama fut-e a megadott URL-en (alapból :11434), és az OWUI **szerver** eléri-e. "
+                "LM Studio (:1234, /v1) esetén az URL legyen `http://…:1234/v1` és legyen **WIZARD_API_KEY** — "
+                "a Pipe ezt openai módnak ismeri fel."
+            )
+        yield f"**Varázsló LLM hiba ({backend}):** {e}.{hint}"
+
+
+async def _stream_ollama_chat(
+    base_url: str,
+    model: str,
+    messages: list[dict[str, str]],
+) -> AsyncIterator[str]:
+    import httpx
+
+    url = base_url.rstrip("/") + "/api/chat"
+    payload = {"model": model, "messages": messages, "stream": True}
+    timeout = httpx.Timeout(600.0, connect=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, json=payload) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = obj.get("message") or {}
+                c = msg.get("content")
+                if c:
+                    yield c
+
+
+async def _stream_openai_compatible_chat(
+    base_url: str,
+    model: str,
+    messages: list[dict[str, str]],
+    api_key: str | None,
+) -> AsyncIterator[str]:
+    """OpenAI-kompatibilis /v1/chat/completions (LM Studio, LocalAI, stb.), SSE stream."""
+    import httpx
+
+    base = _canonical_openai_base(base_url)
+    url = base if base.endswith("/chat/completions") else base.rstrip("/") + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key and api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+    payload = {"model": model, "messages": messages, "stream": True}
+    timeout = httpx.Timeout(600.0, connect=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", url, json=payload, headers=headers) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith(":"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].lstrip()
+                if data.strip() == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                for ch in obj.get("choices") or []:
+                    delta = ch.get("delta") or {}
+                    c = delta.get("content")
+                    if c:
+                        yield c
+                    msg = ch.get("message") or {}
+                    c2 = (msg.get("content") or "") if isinstance(msg, dict) else ""
+                    if c2:
+                        yield c2
+
+
+async def _ollama_chat_completion_once(
+    base_url: str,
+    model: str,
+    messages: list[dict[str, str]],
+) -> str:
+    import httpx
+
+    url = base_url.rstrip("/") + "/api/chat"
+    payload = {"model": model, "messages": messages, "stream": False}
+    timeout = httpx.Timeout(120.0, connect=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+        obj = r.json()
+        msg = obj.get("message") or {}
+        return (msg.get("content") or "").strip()
+
+
+async def _openai_chat_completion_once(
+    base_url: str,
+    model: str,
+    messages: list[dict[str, str]],
+    api_key: str | None,
+) -> str:
+    import httpx
+
+    base = _canonical_openai_base(base_url)
+    url = base if base.endswith("/chat/completions") else base.rstrip("/") + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key and api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+    payload = {"model": model, "messages": messages, "stream": False}
+    timeout = httpx.Timeout(120.0, connect=30.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(url, json=payload, headers=headers)
+        r.raise_for_status()
+        obj = r.json()
+        ch = (obj.get("choices") or [{}])[0]
+        msg = ch.get("message") or {}
+        return (msg.get("content") or "").strip()
+
+
+async def _translate_to_english_via_llm(valves: Any, text: str) -> str | None:
+    """
+    Ha nincs langdetect/deep-translator: egy rövid, nem streamelt chat a varázsló backenddel.
+    None = nem sikerült — az eredeti szöveg marad.
+    """
+    if not (text or "").strip():
+        return None
+    if not _NON_ASCII.search(text):
+        return text
+    base_raw, key_from_url = _parse_wizard_base_and_key(valves)
+    api_key = _resolve_openai_api_key(valves, key_from_url)
+    backend = (getattr(valves, "WIZARD_CHAT_BACKEND", None) or "ollama").strip().lower()
+    if backend not in ("ollama", "openai"):
+        backend = "ollama"
+    backend = _coerce_wizard_backend_from_url(base_raw, backend)
+    model = (getattr(valves, "OLLAMA_MODEL", None) or "").strip()
+    if not base_raw or not model:
+        return None
+    if backend == "openai" and not api_key:
+        return None
+    sys = (
+        "Translate to English for image generation (Stable Diffusion / diffusion prompts). "
+        "Output ONLY the English text, same meaning, no quotes, no explanation."
+    )
+    omsgs: list[dict[str, str]] = [
+        {"role": "system", "content": sys},
+        {"role": "user", "content": text.strip()},
+    ]
+    try:
+        if backend == "openai":
+            out = await _openai_chat_completion_once(base_raw, model, omsgs, api_key or None)
+        else:
+            out = await _ollama_chat_completion_once(base_raw, model, omsgs)
+        if not out or not out.strip():
+            return None
+        return out.strip()
+    except Exception:
+        return None
+
+
+async def _ensure_english_async(valves: Any, text: str, enabled: bool) -> tuple[str, bool]:
+    """Ha van **OLLAMA_MODEL** + URL: fordítás **először LLM**-mel; különben langdetect+translator; utolsó esély: csak ASCII."""
+    if not enabled or not (text or "").strip():
+        return text, False
+    if _llm_translate_available(valves):
+        out = await _translate_to_english_via_llm(valves, text)
+        if out and out.strip():
+            o = out.strip()
+            if o.casefold() != text.strip().casefold():
+                return o, True
+        # LLM üres / hiba → könyvtár
+    if _translation_stack_available():
+        return _ensure_english(text, True)
+    if not _NON_ASCII.search(text):
+        return text, False
+    return text, False
+
+
+async def _run_generate_after_parse(
+    pipe: Any, body: dict, text_for_parse: str, emitter: Any = None
+) -> AsyncIterator[str]:
+    """Bundle feldolgozás → fordítás → bridge (stream vagy sync)."""
+    valves = pipe.valves
+    bundle = _parse_user_bundle(text_for_parse)
+    if not bundle:
+        bundle = {}
+    if not (bundle.get("prompt") or "").strip() and text_for_parse.strip():
+        bundle["prompt"] = text_for_parse.strip()
+
+    prompt_core = (bundle.get("prompt") or "").strip() or text_for_parse.strip()
+    if valves.STRIP_IMAGE_PREFIX:
+        prompt_core = _normalize_prompt_for_image(prompt_core)
+
+    style = (bundle.get("style") or bundle.get("style_label") or "").strip()
+    theme = (bundle.get("theme") or "").strip()
+    style_for_head = style
+    if (style or "").strip().lower() == "anime" and _user_wants_photorealistic(prompt_core):
+        style_for_head = ""
+    prompt_core = _merge_style_into_prompt_core(style_for_head, theme, prompt_core)
+
+    raw_sp = (getattr(valves, "STYLE_PRESETS_JSON", None) or "").strip()
+    if not raw_sp or raw_sp == "{}":
+        raw_sp = _EMBEDDED_STYLE_PRESETS_JSON
+    presets = _load_json_map(raw_sp)
+    preset_key, preset = _match_style_preset(presets, style, theme, prompt_core)
+    if (
+        preset_key
+        and str(preset_key).lower() == "anime"
+        and _user_wants_photorealistic(prompt_core)
+    ):
+        alt = presets.get("Fotorealisztikus")
+        if isinstance(alt, dict) and alt.get("model"):
+            preset_key, preset = "Fotorealisztikus", alt
+    sk = (preset_key or style or "").strip()
+
+    extra_neg = (
+        bundle.get("negative") or bundle.get("negative_prompt") or ""
+    ).strip()
+    map_style = _load_json_map(valves.NEGATIVE_BY_STYLE_JSON)
+    map_theme = _load_json_map(valves.NEGATIVE_BY_THEME_JSON)
+    neg_parts = [(valves.NEGATIVE_PROMPT or "").strip()]
+    if (preset.get("negative_prompt") or "").strip():
+        neg_parts.append(str(preset["negative_prompt"]).strip())
+    neg_parts += _map_fragments(map_style, sk, theme, prompt_core)
+    neg_parts += _map_fragments(map_theme, sk, theme, prompt_core)
+    if extra_neg:
+        neg_parts.append(extra_neg)
+    neg = ", ".join(p for p in neg_parts if p)
+
+    lora_map = _load_json_map(valves.LORA_BY_STYLE_JSON)
+    cfg_extra = _optional_config_json(valves) or {}
+    if isinstance(preset.get("config_json"), dict):
+        cfg_extra = _deep_merge(cfg_extra, preset["config_json"])
+    cfg_style = _config_for_style(lora_map, sk, theme, prompt_core)
+    if cfg_style:
+        cfg_extra = _deep_merge(cfg_extra, cfg_style)
+    if isinstance(bundle.get("config_json"), dict):
+        cfg_extra = _deep_merge(cfg_extra, bundle["config_json"])
+    if isinstance(bundle.get("lora"), dict):
+        cfg_extra = _deep_merge(cfg_extra, bundle["lora"])
+
+    if not prompt_core.strip():
+        yield (
+            "Üres prompt — írj **Prompt** szöveget vagy illeszd be a Gemma-blokkot "
+            "(és ha kell: **KÉSZ MEHET** a végén, `TRIGGER_MODE=required`)."
+        )
+        return
+
+    model = _apply_preset_model(preset, body, valves.DEFAULT_MODEL)
+    full_prompt = _compose_prompt(prompt_core, valves, preset if preset else None)
+    if valves.ENGLISH_PROMPTS and not _translation_stack_available() and not _llm_translate_available(
+        valves
+    ):
+        blob = f"{full_prompt}\n{neg}"
+        if _NON_ASCII.search(blob):
+            yield (
+                "**Fordítás (angol prompt) nem elérhető:** állítsd be **OLLAMA_BASE_URL** + **OLLAMA_MODEL**, "
+                "**vagy** telepítsd `langdetect` + `deep-translator` "
+                "(`pip install langdetect deep-translator`). "
+                "Most a szöveg **fordítás nélkül** megy a bridge felé.\n\n"
+            )
+    fp_en, did_pos = await _ensure_english_async(valves, full_prompt, valves.ENGLISH_PROMPTS)
+    neg_en = neg
+    did_neg = False
+    if neg:
+        neg_en, did_neg = await _ensure_english_async(valves, neg, valves.ENGLISH_PROMPTS)
+    if did_pos or did_neg:
+        src = "LLM" if not _translation_stack_available() else "könyvtár"
+        yield f"*A pozitív és/vagy negatív prompt angolra lett fordítva ({src}).*\n\n"
+
+    cfg_extra = _apply_z_image_pipeline_defaults(valves, model, cfg_extra)
+    # Csak ha a merge-elt config tényleg kikapcsolná a negatívot (ritka preset / CONFIG_JSON).
+    if neg_en and cfg_extra.get("zeroNegativePrompt") is True:
+        cfg_extra = _deep_merge(cfg_extra, {"zeroNegativePrompt": False})
+
+    bw = bundle.get("width")
+    bh = bundle.get("height")
+    if isinstance(bundle.get("size"), str):
+        pw, ph = _parse_size(bundle["size"])
+        if pw:
+            bw = bw or pw
+        if ph:
+            bh = bh or ph
+    pw_p = preset.get("width")
+    ph_p = preset.get("height")
+    width = _resolve_dim(bw, _resolve_dim(pw_p, valves.WIDTH))
+    height = _resolve_dim(bh, _resolve_dim(ph_p, valves.HEIGHT))
+
+    bundle_g = bundle.get("cfg")
+    if bundle_g is None:
+        bundle_g = bundle.get("guidance_scale") or bundle.get("guidanceScale")
+    preset_g = preset.get("cfg")
+    if preset_g is None:
+        preset_g = preset.get("guidance_scale") or preset.get("guidanceScale")
+    # Feloldás: globális Valves > stílus preset > varázsló JSON (a JSON ne írja felül a preset lépés/CFG értékét).
+    steps_val = _resolve_optional_int(
+        valves.STEPS,
+        _resolve_optional_int(
+            preset.get("steps"),
+            bundle.get("steps"),
+        ),
+    )
+    cfg_val = _resolve_optional_float(
+        valves.CFG,
+        _resolve_optional_float(
+            preset_g,
+            bundle_g,
+        ),
+    )
+    seed_val = _resolve_optional_int(
+        bundle.get("seed"),
+        _resolve_optional_int(preset.get("seed"), valves.SEED),
+    )
+    steps_val = _clamp_steps_for_z_image_pipeline(valves, model, steps_val)
+
+    base = valves.BRIDGE_URL.rstrip("/")
+    payload = _strip_none_payload(
+        {
+            "model": model,
+            "prompt": fp_en,
+            "width": width,
+            "height": height,
+            "steps": steps_val,
+            "cfg": cfg_val,
+            "seed": seed_val,
+        }
+    )
+    if neg_en:
+        payload["negative_prompt"] = neg_en
+    if cfg_extra:
+        payload["config_json"] = cfg_extra
+
+    show_params = bool(getattr(valves, "SHOW_GENERATION_PARAMS", True))
+    summary = _format_generation_params_md(
+        model=model,
+        width=width,
+        height=height,
+        steps=steps_val,
+        cfg=cfg_val,
+        seed=seed_val,
+        neg=neg_en or "",
+        show=show_params,
+        preset_label=preset_key,
+        config_json=cfg_extra if cfg_extra else None,
+    )
+    stream_emitter_replace = (
+        bool(valves.STREAM_PROGRESS)
+        and emitter is not None
+        and bool(getattr(valves, "STREAM_PROGRESS_USE_EVENT_EMITTER", True))
+    )
+    summary_prefix = (summary or "") if stream_emitter_replace else ""
+    if not stream_emitter_replace:
+        if summary:
+            yield summary
+
+    try:
+        import httpx  # noqa: F401
+    except ImportError:
+        if valves.STREAM_PROGRESS:
+            msg = (
+                "**Hiányzik a `httpx` csomag** az Open WebUI szerveren. "
+                "Telepítsd: `pip install httpx`, vagy kapcsold ki a **STREAM_PROGRESS**-t "
+                "(egyszerű `/generate` marad, progress nélkül)."
+            )
+            if stream_emitter_replace and summary_prefix:
+                ok = await _owui_emit_replace(emitter, summary_prefix + "\n\n" + msg)
+                if not ok:
+                    yield summary_prefix + "\n\n" + msg
+            else:
+                yield msg
+            return
+
+    if valves.STREAM_PROGRESS:
+        gen_t0 = time.monotonic()
+        url = base + "/generate/stream"
+        last_monotonic = 0.0
+        last_bucket = -1
+        min_delta = float(
+            getattr(valves, "STREAM_PROGRESS_MIN_DELTA", None) or 0.08
+        )
+        if min_delta < 0.01:
+            min_delta = 0.01
+        if min_delta > 0.5:
+            min_delta = 0.5
+        last_bucket = -1
+        first_block = True
+        use_emitter = stream_emitter_replace
+        heartbeat_sec = float(getattr(valves, "STREAM_PROGRESS_HEARTBEAT_SEC", 10.0) or 10.0)
+        min_replace_sec = float(
+            getattr(valves, "STREAM_PROGRESS_MIN_REPLACE_INTERVAL_SEC", 0.5) or 0.5
+        )
+        if heartbeat_sec < 1.0:
+            heartbeat_sec = 1.0
+        # Túl nagy alap (régen 10 s) = emitter módban szinte az egész generálás csak a végén frissült.
+        if min_replace_sec < 0.1:
+            min_replace_sec = 0.1
+        if min_replace_sec > 30.0:
+            min_replace_sec = 30.0
+        single_msg = bool(getattr(valves, "STREAM_PROGRESS_SINGLE_MESSAGE", False))
+        if use_emitter:
+            single_msg = False
+        last_p = 0.0
+        last_cur: int | None = None
+        last_tot: int | None = None
+        last_line = ""
+
+        def _snap_state() -> tuple[float, int | None, int | None, str]:
+            return (
+                round(last_p, 4),
+                last_cur,
+                last_tot,
+                (last_line or "").strip()[:240],
+            )
+
+        def _full_progress_md(include_title: bool) -> str:
+            eta = _progress_eta_suffix(last_p, gen_t0)
+            md = _progress_for_valves(
+                valves,
+                percent_0_1=last_p,
+                current=last_cur,
+                total=last_tot,
+                line=last_line,
+                include_title=include_title,
+                eta_suffix=eta,
+            )
+            if summary_prefix:
+                return summary_prefix + "\n\n" + md
+            return md
+
+        try:
+            if use_emitter:
+                agen = _iter_sse_events(url, payload).__aiter__()
+                progress_seen = False
+                progress_emit_count = 0
+                last_emit_mono = 0.0
+                last_emitted_snap: tuple[float, int | None, int | None, str] | None = None
+                starter = _stream_started_placeholder_md(valves, summary_prefix)
+                ok_s = await _owui_emit_replace(emitter, starter)
+                if not ok_s:
+                    yield starter
+                last_emit_mono = time.monotonic()
+                while True:
+                    try:
+                        ev_name, data = await asyncio.wait_for(
+                            agen.__anext__(), timeout=heartbeat_sec
+                        )
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        now = time.monotonic()
+                        if not progress_seen:
+                            if last_emit_mono > 0 and now - last_emit_mono < min_replace_sec:
+                                continue
+                            wait = _stream_waiting_cli_placeholder_md(valves, summary_prefix)
+                            ok_w = await _owui_emit_replace(emitter, wait)
+                            if not ok_w:
+                                yield wait
+                            last_emit_mono = time.monotonic()
+                            continue
+                        if last_emit_mono > 0 and now - last_emit_mono < min_replace_sec:
+                            continue
+                        content = _full_progress_md(include_title=False)
+                        ok = await _owui_emit_replace(emitter, content)
+                        if not ok:
+                            yield content
+                        last_emit_mono = time.monotonic()
+                        continue
+
+                    if ev_name == "progress":
+                        progress_seen = True
+                        cur = data.get("current")
+                        tot = data.get("total")
+                        raw = _raw_percent_from_payload(
+                            data.get("percent"), cur, tot
+                        )
+                        last_monotonic = max(last_monotonic, raw)
+                        last_p = last_monotonic
+                        if isinstance(cur, (int, float)):
+                            last_cur = int(cur)
+                        if isinstance(tot, (int, float)):
+                            last_tot = int(tot)
+                        last_line = data.get("line") or ""
+                        snap = _snap_state()
+                        now = time.monotonic()
+                        if progress_emit_count > 0:
+                            if now - last_emit_mono < min_replace_sec:
+                                continue
+                            if last_emitted_snap is not None and snap == last_emitted_snap:
+                                continue
+                        content = _full_progress_md(include_title=first_block)
+                        ok = await _owui_emit_replace(emitter, content)
+                        if not ok:
+                            yield content
+                        first_block = False
+                        last_emitted_snap = snap
+                        last_emit_mono = time.monotonic()
+                        progress_emit_count += 1
+                    elif ev_name == "done":
+                        b64 = data.get("image_base64")
+                        if not b64:
+                            err = f"Hiányzó kép a válaszból: `{data!r}`"
+                            if summary_prefix:
+                                full_e = summary_prefix + "\n\n" + err
+                            else:
+                                full_e = err
+                            ok = await _owui_emit_replace(emitter, full_e)
+                            if not ok:
+                                yield full_e
+                            return
+                        had_progress = (
+                            last_p > 1e-6
+                            or last_cur is not None
+                            or last_tot is not None
+                        )
+                        pre = ""
+                        if had_progress:
+                            pre = _progress_for_valves(
+                                valves,
+                                percent_0_1=last_p,
+                                current=last_cur,
+                                total=last_tot,
+                                line=last_line,
+                                include_title=False,
+                            )
+                        tail = (
+                            "### Kész\n\n"
+                            + f"![Draw Things](data:image/png;base64,{b64})"
+                        )
+                        if pre:
+                            final_c = (
+                                (summary_prefix + "\n\n" + pre + "\n\n" + tail)
+                                if summary_prefix
+                                else (pre + "\n\n" + tail)
+                            )
+                        else:
+                            final_c = (
+                                (summary_prefix + "\n\n" + tail)
+                                if summary_prefix
+                                else tail
+                            )
+                        ok = await _owui_emit_replace(emitter, final_c)
+                        if not ok:
+                            yield final_c
+                        return
+                    elif ev_name == "error":
+                        err = f"**Bridge hiba:** {data.get('error', data)}"
+                        full_e = (
+                            (summary_prefix + "\n\n" + err)
+                            if summary_prefix
+                            else err
+                        )
+                        ok = await _owui_emit_replace(emitter, full_e)
+                        if not ok:
+                            yield full_e
+                        return
+            else:
+                yield "\n\n---\n\n" + _stream_started_placeholder_md(valves, "")
+                async for ev_name, data in _iter_sse_events(url, payload):
+                    if ev_name == "progress":
+                        cur = data.get("current")
+                        tot = data.get("total")
+                        raw = _raw_percent_from_payload(
+                            data.get("percent"), cur, tot
+                        )
+                        last_monotonic = max(last_monotonic, raw)
+                        p = last_monotonic
+                        if single_msg:
+                            last_p = p
+                            if isinstance(cur, (int, float)):
+                                last_cur = int(cur)
+                            if isinstance(tot, (int, float)):
+                                last_tot = int(tot)
+                            last_line = data.get("line") or ""
+                            first_block = False
+                            continue
+                        bucket = int(p / min_delta)
+                        if not first_block and bucket == last_bucket:
+                            continue
+                        last_bucket = bucket
+                        eta = _progress_eta_suffix(p, gen_t0)
+                        md = _progress_for_valves(
+                            valves,
+                            percent_0_1=p,
+                            current=cur,
+                            total=tot,
+                            line=data.get("line") or "",
+                            include_title=first_block,
+                            eta_suffix=eta,
+                        )
+                        first_block = False
+                        yield md
+                    elif ev_name == "done":
+                        b64 = data.get("image_base64")
+                        if not b64:
+                            yield f"Hiányzó kép a válaszból: `{data!r}`"
+                            return
+                        had_progress = (
+                            last_p > 1e-6
+                            or last_cur is not None
+                            or last_tot is not None
+                        )
+                        pre = ""
+                        if single_msg and had_progress:
+                            pre = _progress_for_valves(
+                                valves,
+                                percent_0_1=last_p,
+                                current=last_cur,
+                                total=last_tot,
+                                line=last_line,
+                                include_title=True,
+                            )
+                        yield pre + (
+                            "### Kész\n\n"
+                            + f"![Draw Things](data:image/png;base64,{b64})"
+                        )
+                        return
+                    elif ev_name == "error":
+                        yield f"**Bridge hiba:** {data.get('error', data)}"
+                        return
+        except Exception as e:
+            err = f"**Stream hiba:** {e}" + _stream_connection_error_hint(base, e)
+            if use_emitter:
+                full_e = (summary_prefix + "\n\n" + err) if summary_prefix else err
+                ok = await _owui_emit_replace(emitter, full_e)
+                if not ok:
+                    yield full_e
+            else:
+                yield err
+        return
+
+    if not valves.STREAM_PROGRESS:
+        yield "\n\n---\n\n" + _sync_generation_wait_md(valves)
+
+    import requests
+
+    url = base + "/generate"
+    try:
+        r = requests.post(url, json=payload, timeout=3600)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        yield f"Bridge hiba: {e}"
+        return
+
+    b64 = data.get("image_base64")
+    if not b64:
+        yield f"Válasz: {data!r}"
+        return
+
+    prog = data.get("progress") or {}
+    pct = prog.get("percent")
+    step_info = ""
+    if prog.get("current") is not None and prog.get("total"):
+        step_info = f"Lépések: {prog['current']}/{prog['total']}"
+    elif pct is not None:
+        step_info = f"Haladás: {pct:.0%}"
+
+    yield (
+        "### Kész\n\n"
+        + (f"{step_info}\n\n" if step_info else "")
+        + f"![Draw Things](data:image/png;base64,{b64})"
+    )
+
+
+class Pipe:
+    class Valves(BaseModel):
+        BRIDGE_URL: str = Field(
+            default="http://10.0.0.136:8787",
+            description="drawthings_bridge URL (vége / nélkül). Ha az OWUI ugyanazon a gépen fut, mint a bridge: `http://127.0.0.1:8787`.",
+        )
+        DEFAULT_MODEL: str = Field(
+            default="z_image_turbo_1.0_q8p.ckpt",
+            description="Modell, ha a /models lista nem töltődik vagy nincs a választóban.",
+        )
+        NEGATIVE_PROMPT: str = Field(
+            default="",
+            description="Negatív prompt (minden generálásnál). Üres = CLI alapértelmezés.",
+        )
+        STYLE_PREFIX: str = Field(
+            default="",
+            description="A te promptod **elé** kerül (pl. „masterpiece, best quality, anime style”).",
+        )
+        STYLE_SUFFIX: str = Field(
+            default="",
+            description="A te promptod **után** (pl. „soft lighting, detailed”).",
+        )
+        CONFIG_JSON: str = Field(
+            default="",
+            description="Haladó: résleges JSGenerationConfiguration JSON (LoRA stb.). Üres = kihagyva.",
+        )
+        Z_IMAGE_PIPELINE_DEFAULTS: bool = Field(
+            default=False,
+            description=(
+                "Ha **hamis** (alap): **nincs** extra `config_json` a z_image-hez — ugyanaz a viselkedés, mint a CLI-nél "
+                "`--config-json` nélkül (turbo modellnél ez gyakran jobb). "
+                "Ha **igaz**: **UniPC Trailing** (`sampler`: 17); opcionális refiner+hires: **Z_IMAGE_REFINER_HIRES**. "
+                "Preset `config_json` / CONFIG_JSON továbbra is merge-elődik."
+            ),
+        )
+        Z_IMAGE_REFINER_HIRES: bool = Field(
+            default=False,
+            description=(
+                "Ha igaz és **Z_IMAGE_PIPELINE_DEFAULTS** be van kapcsolva: **refinerModel** = ugyanaz a .ckpt, **hiresFix**: true, **refinerStart** (REFINER_START). "
+                "Alapból **ki** — sok gépen homályos képet vagy CLI „no tensors” hibát okozott. "
+                "Minőségjavításhoz előbb emelj **lépést** / próbáld az **UPSCALER_CKPT**-t külön."
+            ),
+        )
+        REFINER_START: float | None = Field(
+            default=0.75,
+            description="`refinerStart` (0…1), ha **Z_IMAGE_REFINER_HIRES** be van kapcsolva.",
+        )
+        Z_IMAGE_MIN_STEPS: int | None = Field(
+            default=12,
+            description=(
+                "Ha **Z_IMAGE_REFINER_HIRES** vagy **UPSCALER_CKPT** aktív: legalább ennyi lépés (`z_image`), "
+                "**kivéve** explicit **Valves STEPS**. Egyszerű (csak UniPC) módnál nincs clamp. "
+                "Cél: CLI „no tensors” hibák csökkentése. **0** = clamp kikapcsolva."
+            ),
+        )
+        UPSCALER_CKPT: str = Field(
+            default="",
+            description=(
+                "Post-**upscaler** `.ckpt` — **alapból üres** (stabil generálás; az upscaler+config néha hibát / lassulást okoz). "
+                "Ha kell 2×: pl. `"
+                + _DEFAULT_UPSCALER_CKPT
+                + "` — **UPSCALER_SCALE_FACTOR**. Lista: bridge `GET {BRIDGE_URL}/upscalers`."
+            ),
+        )
+        UPSCALER_SCALE_FACTOR: float = Field(
+            default=2.0,
+            description="`upscalerScaleFactor` — alapból **2.0** (2×). A 4×-es RealESRGAN fájlokhoz állítsd pl. 4.0-ra.",
+        )
+        STRIP_IMAGE_PREFIX: bool = Field(
+            default=True,
+            description="Levágja a „generálj képet” / generate image elejét.",
+        )
+        REQUIRE_EXPLICIT_IMAGE_REQUEST: bool = Field(
+            default=True,
+            description="Ha igaz: közvetlen generálás csak ha a szál user üzeneteiben van explicit képkérés (IMAGE_REQUEST_REGEX), vagy beillesztett JSON, vagy TRIGGER_REGEX a legutóbbi üzeneten; a kép-varázsló ugyanígy — nem elég, hogy korábban volt assistant válasz. Általános beszélgetés: WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT. A varázsló JSON utáni kép nem esik ide.",
+        )
+        IMAGE_REQUEST_REGEX: str = Field(
+            default=r"(?i)(készíts|generálj|generálj|készítsd|rajzolj|mutass|alkoss|renderelj|illusztrálj|fess|készíts\s+nekem)[\s\S]{0,48}?(képet|képnek|image|picture|drawing|illusztráció)|(képet|képet)\s+(kérek|akarok|néznék|mutass|legyen)|\b(draw|generate|create|make|paint)\s+(an?\s+)?(image|picture|illustration|drawing)\b",
+            description="Explicit képkérés (user üzenetek összefűzve). A Pipe előtte normalizál (pl. generälj→generálj, kepet→képet). Üres = ne szűrj így.",
+        )
+        STREAM_PROGRESS: bool = Field(
+            default=True,
+            description="Ha **igaz** (alap): /generate/stream (SSE) + élő progress + ETA (**UPSCALER_CKPT** hagyjad üresen, ha gond van). **Hamis**: egy `/generate` POST — előtte *„Képgenerálás folyamatban”* üzenet + végén kép.",
+        )
+        STREAM_PROGRESS_UI: str = Field(
+            default="ring",
+            description='Progress megjelenés: "ring" = SVG körvonal + % (kompakt); "bar" = régi ASCII sáv.',
+        )
+        STREAM_PROGRESS_MIN_DELTA: float = Field(
+            default=0.08,
+            description="Min. haladás két chat-frissítés között (0.01–0.5; alap ~8%). Nagyobb = kevesebb sor, kevesebb duplázott gyűrű.",
+        )
+        STREAM_PROGRESS_SINGLE_MESSAGE: bool = Field(
+            default=False,
+            description="Ha **hamis** (alap): **élő** progress-gyűrű a generálás alatt. Ha **igaz**: csak a végén **egy** progress + kép (kevesebb blokk, de nincs közbeni frissítés). **STREAM_PROGRESS_USE_EVENT_EMITTER** bekapcsolva: ez figyelmen kívül marad (mindig élő replace).",
+        )
+        STREAM_PROGRESS_USE_EVENT_EMITTER: bool = Field(
+            default=True,
+            description="Ha **igaz** és az Open WebUI ad **`__event_emitter__`**-t: a progress **ugyanabban a buborékban** frissül (`replace`), nem új soronként. Ha **hamis** vagy nincs emitter: régi viselkedés (yield).",
+        )
+        STREAM_PROGRESS_HEARTBEAT_SEC: float = Field(
+            default=10.0,
+            description="SSE nélkül ennyi másodperc után „ébresztő” (max. ennyi ideig vár a következő eseményre). Min. 1.",
+        )
+        STREAM_PROGRESS_MIN_REPLACE_INTERVAL_SEC: float = Field(
+            default=0.5,
+            description=(
+                "Minimum idő két `replace` frissítés között (Open WebUI **emitter** módban). "
+                "Ha túl nagy (pl. 10 s), a gyűrű „későn jön”: csak az első és a kész kép előtti pillanatban látszik változás. "
+                "Élő visszajelzéshez: **0,3–0,8** s; a heartbeat is ehhez igazodik. Első progress esemény azonnal megjelenhet. Min. 0,1."
+            ),
+        )
+        WIDTH: int | None = Field(default=None)
+        HEIGHT: int | None = Field(default=None)
+        STEPS: int | None = Field(
+            default=None,
+            description="Globális lépésszám — **felülírja** a stílus presetet és a varázsló JSON `steps` mezőjét. Ha üres: **preset** > varázsló JSON.",
+        )
+        CFG: float | None = Field(
+            default=None,
+            description="Globális CFG — **felülírja** a presetet és a varázsló JSON `cfg` / `guidanceScale` mezőjét. Ha üres: **preset** > varázsló JSON.",
+        )
+        SEED: int | None = Field(
+            default=None,
+            description="Fix seed (reprodukálható kép). Üres = véletlen. A JSON `seed` felülírja.",
+        )
+        SHOW_GENERATION_PARAMS: bool = Field(
+            default=True,
+            description="Generálás előtt mutassa a chatben: .ckpt, méret, steps, CFG, seed, negatív prompt.",
+        )
+        TRIGGER_MODE: str = Field(
+            default="off",
+            description="off = minden üzenet indul; optional = trigger nélkül is (teljes szöveg=prompt); required = csak TRIGGER_REGEX-re indul.",
+        )
+        TRIGGER_REGEX: str = Field(
+            default=r"(?i)(kész[\s,]*mehet|^\s*mehet\s*$|indítsd?|generálj\s+most|kész\s+vagyok|^go\s*$|^\s*start\s*$)",
+            description="Ha illeszkedik: generálás (required/optional). Állítsd a saját kulcsszavaidra.",
+        )
+        MERGE_HISTORY_ON_SHORT_TRIGGER: bool = Field(
+            default=True,
+            description="Ha a legutóbbi üzenet csak trigger + kevés szöveg: az előző user üzenetek is bekerülnek (Gemma-blokk külön üzenetben).",
+        )
+        NEGATIVE_BY_STYLE_JSON: str = Field(
+            default="{}",
+            description='Kulcsszó → negatív részlet, pl. {"anime":"bad anatomy, extra limbs","photo":"cartoon, drawing"}. A stílus/téma/prompt szövegben keres.',
+        )
+        NEGATIVE_BY_THEME_JSON: str = Field(
+            default="{}",
+            description="Ugyanígy téma kulcsokhoz (pl. portrait, landscape).",
+        )
+        LORA_BY_STYLE_JSON: str = Field(
+            default="{}",
+            description='Stílus kulcsszó → részleges config_json (dict), pl. {"anime":{"loras":[...]}} — deep merge a CONFIG_JSON-szal.',
+        )
+        STYLE_PRESETS_JSON: str = Field(
+            default="{}",
+            description=(
+                "Stílus-kulcs → preset JSON. **Üres vagy `{}` = a Pipe beágyazott listája** (ugyanaz, mint korábban a fájlban). "
+                "A `style_label` / varázsló JSON egyeztetése **normalizálja** a szóközt és aláhúzást (pl. `Digitalis_festmeny` ≈ `Digitalis festmeny`). "
+                "Saját listához illeszd be a teljes JSON-t. Beágyazott kulcsok: Anime, Fotorealisztikus, … — az **nsfw** preset külön checkpoint: `zimageturbonsfw_45bf16diffusion_f16.ckpt`, a többi alapból `z_image_turbo_1.0_q8p.ckpt`. "
+                "Mezők: `model`, `steps` (8–20 a beágyazott listában stílusonként), `cfg` (stílusonként; z_image-nél jellemzően ~4–6), `negative_prompt`, `style_prefix`/`style_suffix`, `config_json`. "
+                "Feloldás: **Valves STEPS/CFG** > **preset** > varázsló JSON (`steps` / `cfg` / `guidanceScale`). "
+                "z_image turbo: alapból **ne** erőltesd a Pipe pipeline-t (**Z_IMAGE_PIPELINE_DEFAULTS** hamis = CLI-szerű); UniPC: kapcsold be + **Z_IMAGE_REFINER_HIRES** ha kell."
+            ),
+        )
+        ENGLISH_PROMPTS: bool = Field(
+            default=True,
+            description="Ha igaz: pozitív és negatív prompt angolra — **először LLM** (**OLLAMA_MODEL** + **OLLAMA_BASE_URL**), ha van; különben langdetect+deep-translator (pip); egyik sincs: változatlan.",
+        )
+        WIZARD_OLLAMA_CHAT: bool = Field(
+            default=True,
+            description="Ha igaz: a Pipe előbb LLM-mel beszélget (varázsló), ugyanabban a körben a JSON után indul a kép. Kell: OLLAMA_MODEL + OLLAMA_BASE_URL; kikapcsolva: csak prompt/JSON → kép.",
+        )
+        WIZARD_CHAT_BACKEND: str = Field(
+            default="ollama",
+            description='Varázsló LLM: "ollama" = /api/chat (:11434); "openai" = /v1/chat/completions (LM Studio). Ha az URL-ben szerepel :1234 vagy /v1, a Pipe **openai**-t használ (nem kell kézzel váltani).',
+        )
+        OLLAMA_BASE_URL: str = Field(
+            default="http://127.0.0.1:11434",
+            description="Ollama: http://127.0.0.1:11434. LM Studio: **kötelező a :1234** a címben, pl. http://10.0.0.1:1234/v1 — DDNS-nél ne `http://ddns.net/v1` (:80), hanem `http://ddns.net:1234/v1` + router portforward.",
+        )
+        WIZARD_API_KEY: str = Field(
+            default="",
+            description="LM Studio: kötelező Bearer token (Local Server → Developer → API key). Alternatíva: az OWUI szerver környezetében LM_API_TOKEN. Ollama módnál üres.",
+        )
+        OLLAMA_MODEL: str = Field(
+            default="",
+            description="Ollama: pl. gemma3:4b. LM Studio: a betöltött modell neve a szerver szerint. Üres = varázsló ki.",
+        )
+        WIZARD_SYSTEM_PROMPT: str = Field(
+            default="",
+            description="Üres = beágyazott magyar varázsló prompt + **`{{STYLE_PRESET_LIST}}`** helyére a **STYLE_PRESETS_JSON** összes kulcsa kerül. Saját szövegnél te is használhatod a `{{STYLE_PRESET_LIST}}` helyőrzőt; nélküle a lista a prompt végére fűződik.",
+        )
+        WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT: bool = Field(
+            default=True,
+            description=(
+                "Ha igaz és REQUIRE_EXPLICIT_IMAGE_REQUEST miatt nem indul a kép-varázsló: ugyanaz az LLM (OLLAMA_MODEL) "
+                "általános beszélgetésként válaszol (GENERAL_CHAT_SYSTEM_PROMPT). Ha hamis: rövid tájékoztató üzenet, LLM hívás nélkül."
+            ),
+        )
+        GENERAL_CHAT_SYSTEM_PROMPT: str = Field(
+            default="",
+            description="Üres = beágyazott magyar általános chat system prompt; csak ha WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT és nincs explicit képszándék.",
+        )
+
+    def __init__(self):
+        self.valves = self.Valves()
+
+    def pipes(self):
+        """Modellválasztó: letöltött .ckpt lista a bridge-től (interaktív)."""
+        import requests
+
+        out: list[dict[str, str]] = []
+        base = self.valves.BRIDGE_URL.rstrip("/")
+        # Első helyen: egy név, hogy ne csak „új .ckpt modellek” jelenjenek meg külön képgenerálónak.
+        out.append(
+            {
+                "id": PIPE_DEFAULT_MODEL_SENTINEL,
+                "name": "🖼 Draw Things + beszélgetés (LLM → JSON → kép)",
+            }
+        )
+        try:
+            r = requests.get(
+                f"{base}/models",
+                params={"downloaded_only": True},
+                timeout=12,
+            )
+            r.raise_for_status()
+            for m in r.json().get("models", []):
+                fid = m.get("file") or m.get("id")
+                if not fid or not str(fid).endswith(".ckpt"):
+                    continue
+                label = m.get("name", fid)
+                out.append({"id": fid, "name": f"🖼 {label}"})
+        except Exception:
+            pass
+        if not out:
+            d = self.valves.DEFAULT_MODEL
+            out = [{"id": d, "name": f"🖼 {d}"}]
+        return out
+
+    async def pipe(self, body: dict, __user__: dict | None = None, **kwargs: Any):
+        emitter = kwargs.get("__event_emitter__")
+        mode = (self.valves.TRIGGER_MODE or "off").strip().lower()
+        if mode not in ("off", "optional", "required"):
+            mode = "off"
+
+        tre_raw = (self.valves.TRIGGER_REGEX or "").strip()
+        try:
+            tre = re.compile(tre_raw, re.IGNORECASE | re.UNICODE) if tre_raw else None
+        except re.error:
+            tre = None
+
+        if mode == "off":
+            raw_text = _last_user_text(body)
+        else:
+            raw_text = _merged_user_text_for_parse(
+                body,
+                tre_raw if tre else "",
+                bool(self.valves.MERGE_HISTORY_ON_SHORT_TRIGGER),
+            )
+
+        if not raw_text:
+            yield "Nincs felhasználói üzenet (prompt)."
+            return
+
+        json_ready = _is_ready_generate_json(raw_text)
+        if (
+            _wizard_ollama_enabled(self.valves)
+            and not json_ready
+        ):
+            if not _wizard_entry_allowed(
+                self.valves, body, raw_text, json_ready, tre
+            ):
+                if getattr(self.valves, "WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT", True):
+                    sys_g = _load_general_chat_system_prompt(self.valves)
+                    if not _owui_messages_for_ollama(body, sys_g):
+                        yield "Nincs üzenet a varázsló LLM számára."
+                        return
+                    buf_gc: list[str] = []
+                    async for ch in _async_stream_wizard_llm(self.valves, body, sys_g):
+                        buf_gc.append(ch)
+                        yield ch
+                    if not "".join(buf_gc).strip():
+                        yield _WIZARD_EMPTY_LLM_REPLY_HU
+                    return
+                yield (
+                    "Üdv! A **PicGEN** csatorna képgeneráláshoz van beállítva. "
+                    "Ha képet szeretnél, írd például: **„Generálj képet”** vagy **„Készíts képet: …”** — "
+                    "akkor elindul a varázsló. Ha csak beszélgetnél, válassz másik modellt, vagy add meg a képkérést."
+                )
+                return
+            sys_p = _load_wizard_system_prompt(self.valves)
+            if not _owui_messages_for_ollama(body, sys_p):
+                yield "Nincs üzenet a varázsló LLM számára."
+                return
+            buf: list[str] = []
+            async for ch in _async_stream_wizard_llm(self.valves, body, sys_p):
+                buf.append(ch)
+                yield ch
+            assistant_full = "".join(buf)
+            if not assistant_full.strip():
+                yield _WIZARD_EMPTY_LLM_REPLY_HU
+                return
+            jb = _try_parse_json_object(assistant_full)
+            if jb and (jb.get("prompt") or "").strip():
+                yield "\n\n---\n\n**Képgenerálás indul…**\n\n"
+                tp = "```json\n" + json.dumps(jb, ensure_ascii=False) + "\n```"
+                async for part in _run_generate_after_parse(self, body, tp, emitter):
+                    yield part
+            # Nincs extra üzenet, ha még nincs JSON — a varázsló több körben kérdez (stílus, prompt…); ez normális.
+            return
+
+        if tre and mode == "required" and not tre.search(raw_text) and not json_ready:
+            yield _help_trigger_hu(self.valves)
+            return
+
+        if not _explicit_image_intent_ok(self.valves, body, raw_text, json_ready, tre):
+            yield (
+                "**Nincs explicit képkérés** a beszélgetésben. Példa: **„Készíts képet: …”**, **„Generálj képet”**, "
+                "**„Rajzolj nekem…”** — vagy angolul *generate an image*, *draw a picture*. "
+                "Alternatíva: **varázsló** + JSON, **```json```** blokk beillesztése, vagy a **TRIGGER_REGEX** szerinti szó (pl. KÉSZ MEHET). "
+                "Kikapcsolás: Valves **REQUIRE_EXPLICIT_IMAGE_REQUEST** = false."
+            )
+            return
+
+        if tre and mode in ("optional", "required") and tre.search(raw_text):
+            text_for_parse = tre.sub("", raw_text).strip()
+        else:
+            text_for_parse = raw_text.strip()
+
+        async for part in _run_generate_after_parse(self, body, text_for_parse, emitter):
+            yield part

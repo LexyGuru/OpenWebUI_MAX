@@ -1,0 +1,3 @@
+# Open WebUI szerverre: automatikus angol fordítás a Draw Things Pipe promptjaihoz
+langdetect>=1.0.9
+deep-translator>=1.11.4
