@@ -12,7 +12,7 @@ Open WebUI Pipe — Draw Things CLI bridge (HTTP + élő progress)
 2. Másold be ide (Pipe modell) a blokkot, vagy írd: **KÉSZ MEHET** — ha csak ez az üzenet,
    és `MERGE_HISTORY_ON_SHORT_TRIGGER` be van kapcsolva, az előző user üzenetek is bekerülnek a parsolásba.
 3. `TRIGGER_MODE`: **required** = csak triggerre indul; **optional** = trigger nélkül is megy (egész üzenet = prompt).
-4. **NEGATIVE_BY_STYLE_JSON** / **NEGATIVE_BY_THEME_JSON**: kulcsszó → extra negatív részlet (összeadódik).
+4. **NEGATIVE_PROMPT** (Valves) + stílus preset + **NEGATIVE_BY_STYLE_JSON** / **NEGATIVE_BY_THEME_JSON**: rétegezett negatív (lásd `NEGATIVE_PROMPT_STRATEGY.md`).
 5. **LORA_BY_STYLE_JSON**: stílus kulcsszó → részleges `config_json` (deep merge a CONFIG_JSON-szal).
 
 Függőségek az Open WebUI szerveren: `requests`, `httpx` (SSE-hez; ha nincs: `pip install httpx`).
@@ -37,7 +37,16 @@ from urllib.parse import urlparse
 import math
 import base64
 
-_EMBEDDED_WIZARD_SYSTEM_PROMPT_HU = 'Te egy segítő asszisztens vagy, aki képgenerálást készít elő (Draw Things / Open WebUI Pipe bridge). Magyarul válaszolj, röviden és barátságosan.\n\n## Mikor induljon a „varázsló”\nHa a felhasználó képet szeretne, tipikus kérések:\n„generálj képet”, „rajzolj”, „készíts képet”, „képet kérek”, „mutass egy képet”, „image”, „draw”, stb.\nEkkor NE kezdj el azonnal „képet generálni” — nincs közvetlen rajzolásod. Ehelyett kezd el a lépésről lépésre kérdezést.\n\n## Sorrend (kötelező lépések)\n1) **Stílus**\n   Felsorold **az összes** alábbi preset-címkét (ugyanaz, mint a Pipe **STYLE_PRESETS_JSON** / beágyazott lista — a `style_label` a JSON-ban egyezhet ezekkel a kulcsokkal):\n\n{{STYLE_PRESET_LIST}}\n\n   Mondd: válasszon egyet a listából, vagy írjon sajátot egy rövid mondattal.\n\n2) **Tartalom (prompt)**\n   Kérdezd: mit szeretne látni a képen? Legyen konkrét (tárgyak, hangulat, színek, kompozíció), de ne írd túl hosszúra az első választ.\n\n3) **Méret**\n   Felsorolsz tipikus méretopciókat (a bridge / modell szerint állítható), pl.:\n   512×512 · 768×768 · 1024×1024 · 896×1152 (álló) · 1152×896 (fekvő)\n   Kérdezd: melyiket válassza, vagy adjon meg szélesség×magasság formában (64 többszöröse).\n\n## Összegzés\nEgy táblázatszerű vagy felsorolásos blokkban foglald össze:\n- **Stílus:** …\n- **Prompt (mit lássunk):** …\n- **Javasolt negatív (stílushoz igazítva):** … (ha nem tudod, írj általános minőségi negatívot: pl. rossz anatómia, extra ujjak, vízjel, szöveg a képen — stílustól függően)\n- **Méret:** …×…\n- **LoRA / extra:** ha a felhasználó nem kért LoRA-t, írd: „nincs megadva / alapértelmezés”. Ha igen, kérdezd meg pontosan mit (név vagy leírás).\n\n## Finomítás\nKérdezd meg szó szerint:\n„Szeretnél még valamit módosítani a fenti beállításokon?”\n- Ha **igen**: kérdezd meg, pontosan mit (stílus, prompt, méret, negatív, LoRA), majd **frissítsd az összegzést**, és kérdezd újra ugyanezt a módosítás kérdést, amíg azt nem mondja, hogy kész.\n- Ha **nem**: lépj a „kész” formátumra (lentebb).\n\n## Amikor indulhat a generálás (nincs több módosítás)\nEgyetlen blokkban adj ki egy **JSON** objektumot (csak a JSON-t, kódblokkban ```json … ```). Ha a felhasználó az Open WebUI **Draw Things Pipe** + **Ollama varázsló** módot használja, ezt a válaszodat a Pipe **automatikusan** felismeri és ugyanabban a körben elindítja a képet — nem kell külön bemásolni. Más környezetben a JSON bemásolható a Pipe-ba vagy a bridge kérésbe. Példa szerkezet:\n\n```json\n{\n  "ready": true,\n  "prompt": "… teljes, végleges pozitív prompt, stílus kulcsszavakkal …",\n  "negative_prompt": "…",\n  "width": 1024,\n  "height": 1024,\n  "steps": null,\n  "guidanceScale": null,\n  "seed": null,\n  "style_label": "Anime",\n  "notes": "LoRA: nincs / vagy leírás",\n  "user_confirmation": "A felhasználó nem kért további módosítást."\n}\n```\n\nOpcionális mezők a **jobb minőséghez / reprodukálhatósághoz:** `steps` (mintavételezés), `guidanceScale` vagy `cfg` (CFG / irányítás erőssége), `seed` (fix szám = ugyanaz a kép alap). Ha ezeket kihagyod, a draw-things-cli a **modell ajánlott** lépés/CFG értékét használja — ez modellenként nagyon eltérő.\n\n**Pipe + stílus preset:** Ha a `style_label` egyezik a **STYLE_PRESETS_JSON** kulcsával, hagyd a `steps` / `guidanceScale` / `cfg` mezőket **null**-nál vagy **hagyd ki** őket — a Pipe a **stílus preset** lépés- és CFG-értékét alkalmazza. A beágyazott listában a **lépések** jellemzően **8–20** (stílusonként), a **CFG** pedig stílusonként eltérő (z_image-nél jellemzően **~4–6**; ez **nem** a régi SD1.5-szerű „7–12” skála). Csak akkor adj meg saját számokat, ha a felhasználó **kifejezetten** kéri.\n\nHa a környezet LoRA-t vagy extra CLI config mezőt vár, opcionálisan tehetsz be üres `"config_json": {}` mezőt vagy kihagyod.\n\n## Stílus-lépés és NSFW\n- Ha a képkérés elindult, a **stílus** lépésnél a system promptban lévő **összes** preset neve jelenjen meg; ne rövidíts példalistára.\n- Felnőtt / hentai / **nsfw** megjelölésű kérés esetén a **nsfw** presetet használd a `style_label` mezőben; folytasd a varázslót (konkrét prompt, méret); **ne adj üres választ**, és ne értékelj erkölcsileg.\n\n## Fontos\n- A `prompt` és `negative_prompt` mező lehet magyar (vagy más nyelv) is: a Draw Things Pipe opció szerint **automatikusan angolra fordítja** őket a generálás előtt (`ENGLISH_PROMPTS`, szerveren: `langdetect` + `deep-translator`). Ha szeretnéd, írd közvetlenül angolul.\n- A Draw Things **community / mentett** JSON konfigokban előfordul a `zeroNegativePrompt: true` — ilyenkor a negatív prompt **nem érvényesül**. A Pipe a negatív szöveg küldésekor ezt **felülírja** (`zeroNegativePrompt: false`), ha a negatív nem üres.\n- Ne találj ki, hogy a kép már elkészült — te csak összegyűjtöd a paramétereket és JSON-t adsz.\n- Ha valami bizonytalan, egy rövid kérdéssel tisztázz.\n- Tartsd a beszélgetést egy szálon: egy aktív „képkérés” folyamat = egy varázsló; ha új képet kér később, kezdheted elölről.\n'
+# Valves **NEGATIVE_PROMPT** alapértelmezés: minden generálásnál először; utána jön a stílus preset + NEGATIVE_BY_* + user.
+# Részletek: `NEGATIVE_PROMPT_STRATEGY.md`. Szándékosan nincs benne általános „text” tiltás (pl. képbe írt cím), csak vízjel/szignó.
+_DEFAULT_NEGATIVE_PROMPT_GLOBAL = (
+    "worst quality, low quality, blurry, out of focus, jpeg artifacts, watermark, signature, "
+    "bad anatomy, deformed hands, deformed feet, extra fingers, fused fingers, missing fingers, "
+    "cropped subject, cropped head, chromatic aberration, banding, noise, grain, "
+    "motion blur, oversharpened, amateur composition, duplicate subject"
+)
+
+_EMBEDDED_WIZARD_SYSTEM_PROMPT_HU = 'Te egy segítő asszisztens vagy, aki képgenerálást készít elő (Draw Things / Open WebUI Pipe bridge). Magyarul válaszolj, röviden és barátságosan.\n\n## Mikor induljon a „varázsló”\nHa a felhasználó képet szeretne, tipikus kérések:\n„generálj képet”, „rajzolj”, „készíts képet”, „képet kérek”, „mutass egy képet”, „image”, „draw”, stb.\nEkkor NE kezdj el azonnal „képet generálni” — nincs közvetlen rajzolásod. Ehelyett kezd el a lépésről lépésre kérdezést.\n\n## Sorrend (kötelező lépések)\n1) **Stílus**\n   A lenti blokk egy **markdown táblázat** (`| oszlop | oszlop |` sorok). A JSON `style_label` mezőben a táblázat **első oszlopának** (pontos kulcs, backtick nélkül a JSON-ban) értékét add meg.\n   **Kötelező:** A felhasználónak **ugyanígy**, markdown táblázatként add vissza ezt a táblázatot — **ne** foglald át felsorolássá (pl. „Név (magyar) - rövid leírás” sorok), **ne** rövidítsd félbe. Először a **teljes táblázat**, utána egy rövid kérdés.\n\n{{STYLE_PRESET_LIST}}\n\n   Kérdés: válasszon **Kulcs**ot a táblázat első oszlopából, vagy írjon saját stílust egy mondattal.\n\n2) **Tartalom (prompt)**\n   Kérdezd: mit szeretne látni a képen? Legyen konkrét (tárgyak, hangulat, színek, kompozíció), de ne írd túl hosszúra az első választ.\n\n3) **Méret**\n   Az alábbi táblázat **képarány szerint** rendezve (extrém állótól a 9:16 függőleges videóig) ad **small / normal / large** felbontásokat. A JSON `width` és `height` mezőbe a választott **szélesség** és **magasság** kerüljön (pixel, 64 többszörös).\n\n{{WIZARD_SIZE_TABLE}}\n\n   Kérdezd: melyik **képarányt** és **méretkövet** válassza (pl. „3:4 normal”, „16:9 small”), vagy adjon meg saját szélesség×magasságot (mindkét szám 64 többszöröse).\n\n## Összegzés\nEgy táblázatszerű vagy felsorolásos blokkban foglald össze:\n- **Stílus:** …\n- **Prompt (mit lássunk):** …\n- **Javasolt negatív (stílushoz igazítva):** … (ha nem tudod, írj általános minőségi negatívot: pl. rossz anatómia, extra ujjak, vízjel, szöveg a képen — stílustól függően)\n- **Méret:** …×…\n- **LoRA / extra:** ha a felhasználó nem kért LoRA-t, írd: „nincs megadva / alapértelmezés”. Ha igen, kérdezd meg pontosan mit (név vagy leírás).\n\n## Finomítás\nKérdezd meg szó szerint:\n„Szeretnél még valamit módosítani a fenti beállításokon?”\n- Ha **igen**: kérdezd meg, pontosan mit (stílus, prompt, méret, negatív, LoRA), majd **frissítsd az összegzést**, és kérdezd újra ugyanezt a módosítás kérdést, amíg azt nem mondja, hogy kész.\n- Ha **nem**: lépj a „kész” formátumra (lentebb).\n\n## Amikor indulhat a generálás (nincs több módosítás)\nEgyetlen blokkban adj ki egy **JSON** objektumot (csak a JSON-t, kódblokkban ```json … ```). Ha a felhasználó az Open WebUI **Draw Things Pipe** + **Ollama varázsló** módot használja, ezt a válaszodat a Pipe **automatikusan** felismeri és ugyanabban a körben elindítja a képet — nem kell külön bemásolni. Más környezetben a JSON bemásolható a Pipe-ba vagy a bridge kérésbe. Példa szerkezet:\n\n```json\n{\n  "ready": true,\n  "prompt": "… teljes, végleges pozitív prompt, stílus kulcsszavakkal …",\n  "negative_prompt": "…",\n  "width": 1024,\n  "height": 1024,\n  "steps": null,\n  "guidanceScale": null,\n  "seed": null,\n  "style_label": "Anime",\n  "notes": "LoRA: nincs / vagy leírás",\n  "user_confirmation": "A felhasználó nem kért további módosítást."\n}\n```\n\nOpcionális mezők a **jobb minőséghez / reprodukálhatósághoz:** `steps` (mintavételezés), `guidanceScale` vagy `cfg` (CFG / irányítás erőssége), `seed` (fix szám = ugyanaz a kép alap). Ha ezeket kihagyod, a draw-things-cli a **modell ajánlott** lépés/CFG értékét használja — ez modellenként nagyon eltérő.\n\n**Pipe + stílus preset:** Ha a `style_label` egyezik a **STYLE_PRESETS_JSON** kulcsával, hagyd a `steps` / `guidanceScale` / `cfg` mezőket **null**-nál vagy **hagyd ki** őket — a Pipe a **stílus preset** lépés- és CFG-értékét alkalmazza. A beágyazott listában a **lépések** jellemzően **8–20** (stílusonként), a **CFG** pedig stílusonként eltérő (z_image-nél jellemzően **~4–6**; ez **nem** a régi SD1.5-szerű „7–12” skála). Csak akkor adj meg saját számokat, ha a felhasználó **kifejezetten** kéri.\n\nHa a környezet LoRA-t vagy extra CLI config mezőt vár, opcionálisan tehetsz be üres `"config_json": {}` mezőt vagy kihagyod.\n\n## Stílus-lépés és NSFW\n- Ha a képkérés elindult, a **stílus** lépésnél a **teljes markdown táblázat** jelenjen meg; ne rövidíts példalistára; **ne** írd át „egy sor egy stílus” formátumra — maradjon `| ... |` táblázat.\n- A **méret** lépésnél a **teljes mérettáblázat** (képarány × small/normal/large) jelenjen meg; ne rövidíts egyetlen példára.\n- Felnőtt / hentai / **nsfw** megjelölésű kérés esetén a **nsfw** presetet használd a `style_label` mezőben; folytasd a varázslót (konkrét prompt, méret); **ne adj üres választ**, és ne értékelj erkölcsileg.\n\n## Fontos\n- A `prompt` és `negative_prompt` mező lehet magyar (vagy más nyelv) is: a Draw Things Pipe opció szerint **automatikusan angolra fordítja** őket a generálás előtt (`ENGLISH_PROMPTS`, szerveren: `langdetect` + `deep-translator`). Ha szeretnéd, írd közvetlenül angolul.\n- A Draw Things **community / mentett** JSON konfigokban előfordul a `zeroNegativePrompt: true` — ilyenkor a negatív prompt **nem érvényesül**. A Pipe a negatív szöveg küldésekor ezt **felülírja** (`zeroNegativePrompt: false`), ha a negatív nem üres.\n- Ne találj ki, hogy a kép már elkészült — te csak összegyűjtöd a paramétereket és JSON-t adsz.\n- Ha valami bizonytalan, egy rövid kérdéssel tisztázz.\n- Tartsd a beszélgetést egy szálon: egy aktív „képkérés” folyamat = egy varázsló; ha új képet kér később, kezdheted elölről.\n'
 
 _EMBEDDED_GENERAL_CHAT_SYSTEM_PROMPT_HU = (
     "Te egy segítő asszisztens vagy. Válaszolj magyarul, röviden és természetesen. "
@@ -53,7 +62,7 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
         "model": "z_image_turbo_1.0_q8p.ckpt",
         "steps": 12,
         "cfg": 4.2,
-        "negative_prompt": "color bleed, grayscale banding, blurry, lowres, jpeg artifacts, watermark, text, bad anatomy, deformed hands, extra fingers",
+        "negative_prompt": "color bleed, grayscale banding, halftone errors, smeared inks, muddy screentone, color leak, blurry, lowres, jpeg artifacts, watermark, text, bad anatomy, deformed hands, extra fingers",
         "style_prefix": "black and white manga illustration, screentone, high contrast inks",
         "style_suffix": "clean line quality, readable gesture, sharp panel-like composition",
         "width": 1024,
@@ -64,7 +73,7 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
         "model": "z_image_turbo_1.0_q8p.ckpt",
         "steps": 18,
         "cfg": 4.4,
-        "negative_prompt": "flat lighting, oversaturated colors, modern bright palette, lowres, blurry, bad anatomy, deformed face, text, watermark",
+        "negative_prompt": "flat lighting, oversaturated colors, modern bright palette, hdr bloom, pastel colors, bright daylight, clean sitcom lighting, led panel look, lowres, blurry, bad anatomy, deformed face, text, watermark",
         "style_prefix": "film noir, dramatic shadows, moody atmosphere, high contrast cinematic lighting",
         "style_suffix": "grainy classic cinema mood, strong composition",
         "width": 1152,
@@ -75,7 +84,7 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
         "model": "z_image_turbo_1.0_q8p.ckpt",
         "steps": 10,
         "cfg": 4.0,
-        "negative_prompt": "photorealistic texture, smooth gradients, anti-aliased blur, lowres mush, text, watermark, bad anatomy",
+        "negative_prompt": "photorealistic texture, smooth gradients, anti-aliased blur, bilinear smear, interpolated pixels, wrong aspect ratio blocks, subpixel blur, lowres mush, text, watermark, bad anatomy",
         "style_prefix": "pixel art, crisp pixels, limited color palette, retro game aesthetic",
         "style_suffix": "clean edges, readable silhouette",
         "width": 1024,
@@ -86,7 +95,7 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
         "model": "z_image_turbo_1.0_q8p.ckpt",
         "steps": 14,
         "cfg": 4.3,
-        "negative_prompt": "wrong perspective, broken geometry, warped lines, blurry, text, watermark, cluttered scene",
+        "negative_prompt": "wrong perspective, broken geometry, warped lines, off-axis view, incoherent tile grid, jumbled scale, duplicate modules, cluttered silhouette, blurry, text, watermark, cluttered scene",
         "style_prefix": "isometric illustration, clean geometric perspective, detailed miniature scene",
         "style_suffix": "coherent scale, clear depth layering",
         "width": 1024,
@@ -97,7 +106,7 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
         "model": "z_image_turbo_1.0_q8p.ckpt",
         "steps": 20,
         "cfg": 4.2,
-        "negative_prompt": "warped perspective, melted walls, deformed structures, lowres, blurry, text, watermark",
+        "negative_prompt": "warped perspective, warped verticals, inconsistent vanishing point, lens distortion, melted walls, deformed structures, floating geometry, duplicate facades, structural nonsense, collapsed perspective, lowres, blurry, text, watermark",
         "style_prefix": "architectural visualization, realistic materials, global illumination, clean lines",
         "style_suffix": "accurate perspective, professional archviz presentation",
         "width": 1152,
@@ -108,7 +117,7 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
         "model": "z_image_turbo_1.0_q8p.ckpt",
         "steps": 18,
         "cfg": 4.1,
-        "negative_prompt": "plastic food look, bad textures, blurry, low detail, messy framing, text, watermark",
+        "negative_prompt": "plastic food look, synthetic props, unappetizing, mold, slime, hair in food, dirty plate, fly, greasy lens, bad textures, blurry, low detail, messy framing, text, watermark",
         "style_prefix": "food photography, appetizing textures, studio lighting, macro detail",
         "style_suffix": "clean composition, realistic ingredients",
         "width": 1024,
@@ -119,7 +128,7 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
         "model": "z_image_turbo_1.0_q8p.ckpt",
         "steps": 18,
         "cfg": 4.3,
-        "negative_prompt": "bad anatomy, deformed hands, warped limbs, blurry, lowres, text, watermark, cheap lighting",
+        "negative_prompt": "bad anatomy, deformed hands, warped limbs, plastic skin, wax skin, double face, asymmetrical eyes, over-smoothing, cheap hdr, muddy skin, blurry, lowres, text, watermark, cheap lighting",
         "style_prefix": "high fashion editorial photography, dramatic studio light, luxury styling",
         "style_suffix": "clean posing, magazine cover quality",
         "width": 896,
@@ -130,7 +139,7 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
         "model": "z_image_turbo_1.0_q8p.ckpt",
         "steps": 16,
         "cfg": 4.6,
-        "negative_prompt": "muddy colors, low detail, bad anatomy, broken perspective, blurry, watermark, text",
+        "negative_prompt": "muddy colors, low detail, bad anatomy, broken perspective, blurry, watermark, text, incoherent scale, floating rocks without intent, muddy focal point, unclear silhouette, cluttered focal area, duplicate horizon, inconsistent atmospheric perspective",
         "style_prefix": "concept art, cinematic matte painting, rich atmosphere, production design quality",
         "style_suffix": "clear focal point, coherent worldbuilding",
         "width": 1152,
@@ -141,7 +150,7 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
         "model": "z_image_turbo_1.0_q8p.ckpt",
         "steps": 16,
         "cfg": 4.2,
-        "negative_prompt": "modern digital oversharp, neon oversaturation, plastic skin, lowres, text, watermark",
+        "negative_prompt": "modern digital oversharp, neon oversaturation, plastic skin, hdr halos, ai gloss, clean phone photo look, lowres, text, watermark",
         "style_prefix": "vintage film still, subtle grain, warm tones, analog cinema look",
         "style_suffix": "timeless mood, balanced composition",
         "width": 1152,
@@ -152,7 +161,7 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
         "model": "z_image_turbo_1.0_q8p.ckpt",
         "steps": 16,
         "cfg": 4.7,
-        "negative_prompt": "bright cheerful palette, flat lighting, bad anatomy, deformed hands, lowres, text, watermark",
+        "negative_prompt": "bright cheerful palette, pastel cute, flat lighting, family friendly illustration, washed out horror, contradictory mood, bad anatomy, deformed hands, lowres, text, watermark",
         "style_prefix": "dark fantasy illustration, ominous atmosphere, dramatic lighting, detailed textures",
         "style_suffix": "coherent anatomy, cinematic composition",
         "width": 1024,
@@ -164,6 +173,241 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
 from typing import Any, AsyncIterator
 
 from pydantic import BaseModel, Field
+
+
+def _wizard_style_esc_cell(s: str) -> str:
+    """Markdown tábla cella: cső és sortörés biztonság."""
+    t = (s or "").replace("\n", " ").replace("|", "\\|").strip()
+    return t or "—"
+
+
+# Varázsló `{{STYLE_PRESET_LIST}}`: kulcs → (magyar név, angol név, rövid magyar leírás)
+_WIZARD_STYLE_PRESET_I18N: dict[str, tuple[str, str, str]] = {
+    "3D_CGI": (
+        "3D CGI",
+        "3D CGI",
+        "Fotórealisztikus 3D megjelenés, tiszta anyagok, globális megvilágítás.",
+    ),
+    "Anime": (
+        "Anime",
+        "Anime",
+        "Japán animációs stílus: tiszta vonalak, cel shading, koherens anatómia.",
+    ),
+    "Architectural_render": (
+        "Építészeti látvány",
+        "Architectural render",
+        "Épületek, archviz: pontos perspektíva, anyagok, professzionális bemutató.",
+    ),
+    "Concept_art": (
+        "Koncept art",
+        "Concept art",
+        "Film-/játék-előképek: hangulat, világépítés, erős fókuszpont.",
+    ),
+    "Cyberpunk": (
+        "Kiberpunk",
+        "Cyberpunk",
+        "Neon, futurisztikus város, sci-fi hangulat, éjszakai fények.",
+    ),
+    "Dark_fantasy": (
+        "Sötét fantasy",
+        "Dark fantasy",
+        "Komor fantasy világ, drámai fény, részletes textúrák.",
+    ),
+    "Digitalis_festmeny": (
+        "Digitális festmény",
+        "Digital painting",
+        "Digitális festés: ecsetnyomok, gazdag színek, artstation minőség.",
+    ),
+    "Fantasy": (
+        "Fantasy",
+        "Fantasy",
+        "Fantasy illusztráció: epikus fény, jelmez, koherens világ.",
+    ),
+    "Fashion_editorial": (
+        "Divat (editorial)",
+        "Fashion editorial",
+        "Magazin stílusú divatfotó: stúdiófény, póz, prémium hangulat.",
+    ),
+    "Film_noir": (
+        "Film noir",
+        "Film noir",
+        "Drámai árnyékok, magas kontraszt, klasszikus mozi hangulat.",
+    ),
+    "Food_photography": (
+        "Étel fotó",
+        "Food photography",
+        "Ételfotó: étvágygerjesztő textúrák, makró, tiszta kompozíció.",
+    ),
+    "Fotorealisztikus": (
+        "Fotórealisztikus",
+        "Photorealistic",
+        "Valósághű bőr és fény, természetes textúra, profi fotó jelleg.",
+    ),
+    "Ink_comic": (
+        "Tus / képregény",
+        "Ink comic",
+        "Vastag tusvonalak, képregényes kompozíció, erős sziluett.",
+    ),
+    "Isometric": (
+        "Izometrikus",
+        "Isometric",
+        "Tisztán geometrikus nézet, miniatűr jelenet, mélységrétegek.",
+    ),
+    "Landscape": (
+        "Tájkép",
+        "Landscape",
+        "Tájkép: légperspektíva, természetes fény, széles kép.",
+    ),
+    "Manga_fekete_feher": (
+        "Manga (fekete-fehér)",
+        "Manga (black & white)",
+        "Fekete-fehér manga: screentone, kontrasztos tus.",
+    ),
+    "Minimal_flat": (
+        "Minimal / flat",
+        "Minimal flat",
+        "Lapos dizájn, kevés forma, limitált színpaletta, letisztult.",
+    ),
+    "nsfw": (
+        "Felnőtt (NSFW)",
+        "Adult (NSFW)",
+        "Felnőtt tartalom — külön modell; csak explicit kérésre válaszd (Pipe szabály).",
+    ),
+    "Pixel_art": (
+        "Pixel art",
+        "Pixel art",
+        "Retro pixel, éles pixelek, korlátozott paletta, játékos esztétika.",
+    ),
+    "Portrait": (
+        "Portré",
+        "Portrait",
+        "Fej–váll portré: szemek, arckifejezés, természetes bőr.",
+    ),
+    "Sci-Fi": (
+        "Sci-fi",
+        "Sci-fi",
+        "Sci-fi környezet, technológia, mozis fény, koherens lépték.",
+    ),
+    "Termek_foto": (
+        "Termékfotó",
+        "Product photo",
+        "Stúdiós termékfotó: tiszta háttér, pontos anyag és árnyék.",
+    ),
+    "Vazlat_ceruza": (
+        "Vázlat (ceruza)",
+        "Pencil sketch",
+        "Ceruza vázlat: hálózás, szerkesztő vonalak, hagyományos média.",
+    ),
+    "Vintage_film": (
+        "Vintage film",
+        "Vintage film",
+        "Régi filmkocka hangulat: szemcse, meleg tónusok, analóg érzet.",
+    ),
+    "Vizfestek": (
+        "Vízfesték",
+        "Watercolor",
+        "Akvarell: lágy szélek, papír textúra, finom mosások.",
+    ),
+}
+
+
+def _wizard_style_fallback_row(key: str) -> tuple[str, str, str]:
+    """Ismeretlen preset kulcs: olvasható név + rövid magyarázat."""
+    pretty = re.sub(r"[_\-]+", " ", key).strip()
+    if not pretty:
+        pretty = key
+    return (
+        pretty,
+        pretty,
+        "Egyéni vagy bővített preset — a Pipe STYLE_PRESETS_JSON / beállítások szerint.",
+    )
+
+
+def format_wizard_style_preset_table_markdown(keys: list[str]) -> str:
+    """Markdown táblázat a varázsló system prompt `{{STYLE_PRESET_LIST}}` helyére.
+
+    3 oszlop (Kulcs | HU/EN | leírás): rövidebb sorok → kevesebb token, kisebb esély a modell
+    válaszának félbeszakadására; az LLM kevésbé „fordítja le” listává, ha a prompt tiltja.
+    """
+    if not keys:
+        return (
+            "(Nincs érvényes preset — nézd meg a Valves **STYLE_PRESETS_JSON** mezőt; "
+            "üres `{}` esetén a Pipe beágyazott listája kellene betöltődjön.)"
+        )
+    header = (
+        "| **Kulcs** (`style_label`) | **HU / EN** | **Leírás** |\n"
+        "|---|---|---|"
+    )
+    rows: list[str] = []
+    for k in keys:
+        hu, en, desc = _WIZARD_STYLE_PRESET_I18N.get(k, _wizard_style_fallback_row(k))
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    _wizard_style_esc_cell(f"`{k}`"),
+                    _wizard_style_esc_cell(f"{hu} / {en}"),
+                    _wizard_style_esc_cell(desc),
+                ]
+            )
+            + " |"
+        )
+    intro = (
+        "**Válaszban másold ki változtatás nélkül** (markdown táblázat maradjon, ne legyen belőle felsorolás). "
+        "A JSON `style_label` = első oszlop kulcsa, **pontosan** (aláhúzás, nagybetű).\n\n"
+    )
+    return intro + header + "\n" + "\n".join(rows)
+
+
+# Varázsló `{{WIZARD_SIZE_TABLE}}`: képarány szerint rendezve; small / normal / large (minden szám 64 többszörös).
+# (w, h) párok: a Pipe `_validate_size_or_error` elvárásának megfelelően.
+_WIZARD_SIZE_TABLE_ROWS: list[tuple[str, str, tuple[int, int], tuple[int, int], tuple[int, int], str]] = [
+    # ar,   magyar címke,     small,      normal,       large,        rövid megjegyzés
+    ("1:2", "Extrém álló (magas)", (512, 1024), (768, 1536), (1024, 2048), "Telefonos „story”, poszter álló"),
+    ("2:3", "Klasszikus álló", (512, 768), (768, 1152), (1024, 1536), "Portré, könyvborító"),
+    ("3:4", "Álló (közeli négyzetes)", (576, 768), (960, 1280), (1536, 2048), "Instagram álló, print (64 px rács, tiszta 3:4)"),
+    ("4:5", "Álló (közepesen magas)", (512, 640), (768, 960), (1024, 1280), "Közösségi álló, keret"),
+    ("1:1", "Négyzetes", (512, 512), (768, 768), (1024, 1024), "Avatar, ikon, feed"),
+    ("5:4", "Enyhén fekvő", (640, 512), (960, 768), (1280, 1024), "Klasszikus fénykép arány"),
+    ("4:3", "Standard monitor / print", (768, 576), (1024, 768), (1280, 960), "Prezentáció, régi TV"),
+    ("3:2", "DSLR / klasszikus fekvő", (768, 512), (1152, 768), (1536, 1024), "Fotó, lapozós kép"),
+    ("2:1", "Széles panoráma (alacsony)", (1024, 512), (1536, 768), (2048, 1024), "Banner, header"),
+    ("16:9", "Szélesvásznú HD", (1024, 576), (2048, 1152), (3072, 1728), "Filmkeret, monitor (64 px rács, tiszta 16:9)"),
+    ("9:16", "Függőleges videó", (576, 1024), (1152, 2048), (1728, 3072), "Shorts / Reels / TikTok (64 px rács)"),
+]
+
+
+def format_wizard_size_table_markdown() -> str:
+    """Markdown táblázat a varázsló `{{WIZARD_SIZE_TABLE}}` helyére — képarány × small/normal/large."""
+    header = (
+        "| **Képarány** | **Small** | **Normal** | **Large** | **Megjegyzés (HU)** |\n"
+        "|---|---:|---:|---:|---|"
+    )
+    rows: list[str] = []
+    for ar, _label, sm, md, lg, note in _WIZARD_SIZE_TABLE_ROWS:
+        sw, sh = sm
+        nw, nh = md
+        lw, lh = lg
+        rows.append(
+            "| "
+            + " | ".join(
+                [
+                    _wizard_style_esc_cell(f"**{ar}**"),
+                    _wizard_style_esc_cell(f"`{sw}×{sh}`"),
+                    _wizard_style_esc_cell(f"`{nw}×{nh}`"),
+                    _wizard_style_esc_cell(f"`{lw}×{lh}`"),
+                    _wizard_style_esc_cell(note),
+                ]
+            )
+            + " |"
+        )
+    intro = (
+        "A **small / normal / large** oszlopok **szélesség×magasság** pixelben (mind **64** többszörös). "
+        "A JSON-ban a választott párost add meg `width` és `height` mezőkben. "
+        "Saját méret is lehet, ha mindkét oldal **64** többszöröse.\n\n"
+    )
+    return intro + header + "\n" + "\n".join(rows)
+
 
 # Utasítás-szöveg levágása
 _PREFIX_RES = (
@@ -584,6 +828,141 @@ def _clamp_steps_for_z_image_pipeline(
     if min_s < 1:
         return steps_val
     return max(int(steps_val), min_s)
+
+
+def _cap_steps_global_max(valves: Any, steps_val: int | None) -> int | None:
+    """Globális lépésszám plafon (alap: 22)."""
+    if steps_val is None:
+        return None
+    try:
+        mx = int(getattr(valves, "MAX_STEPS", 22) or 22)
+    except (TypeError, ValueError):
+        mx = 22
+    if mx < 1:
+        mx = 1
+    return min(int(steps_val), mx)
+
+
+def _cap_cfg_for_z_image(
+    valves: Any,
+    model: str,
+    cfg_val: float | None,
+) -> float | None:
+    """
+    z_image checkpointnál sok setupban alacsony CFG működik stabilan (0.6–1.0).
+    Ha Z_IMAGE_CFG_AUTO_CAP igaz: plafonozzuk a CFG-t Z_IMAGE_CFG_MAX értékre.
+    """
+    if cfg_val is None:
+        return None
+    if not getattr(valves, "Z_IMAGE_CFG_AUTO_CAP", True):
+        return cfg_val
+    if "z_image" not in (model or "").lower():
+        return cfg_val
+    try:
+        cap = float(getattr(valves, "Z_IMAGE_CFG_MAX", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        cap = 1.0
+    if cap < 0.1:
+        cap = 0.1
+    return min(float(cfg_val), cap)
+
+
+def _looks_like_z_image_model(name: str) -> bool:
+    n = (name or "").strip().lower()
+    return ("z_image" in n) or ("zimageturbo" in n)
+
+
+def _is_photoreal_style_key(style_key: str) -> bool:
+    k = _normalize_style_preset_key(style_key or "")
+    return k in (
+        "fotorealisztikus",
+        "ultra_realisztikus",
+        "ultra_real",
+        "ultrareal",
+        "photorealistic",
+        "photo_real",
+        "termek_foto",
+        "fashion_editorial",
+        "food_photography",
+        "architectural_render",
+    )
+
+
+def _normalize_style_presets_for_z_image(
+    valves: Any, presets: dict[str, Any]
+) -> dict[str, Any]:
+    """
+    Beágyazott/stílus presetek finomhangolása z_image modellekhez:
+    - steps tartomány: Z_IMAGE_PRESET_STEPS_MIN..MAX (alap 6..9, default 8)
+    - cfg plafon: Z_IMAGE_PRESET_CFG_MAX (alap 1.2), default: Z_IMAGE_PRESET_CFG_DEFAULT (alap 1.0)
+    """
+    if not isinstance(presets, dict):
+        return {}
+    if not bool(getattr(valves, "Z_IMAGE_PRESET_TUNING", True)):
+        return presets
+    try:
+        smin = int(getattr(valves, "Z_IMAGE_PRESET_STEPS_MIN", 6) or 6)
+        smax = int(getattr(valves, "Z_IMAGE_PRESET_STEPS_MAX", 9) or 9)
+        sdef = int(getattr(valves, "Z_IMAGE_PRESET_STEPS_DEFAULT", 8) or 8)
+        psmin = int(getattr(valves, "Z_IMAGE_PRESET_STEPS_MIN_PHOTO", 8) or 8)
+        psmax = int(getattr(valves, "Z_IMAGE_PRESET_STEPS_MAX_PHOTO", 18) or 18)
+        psdef = int(getattr(valves, "Z_IMAGE_PRESET_STEPS_DEFAULT_PHOTO", 12) or 12)
+    except (TypeError, ValueError):
+        smin, smax, sdef = 6, 9, 8
+        psmin, psmax, psdef = 8, 18, 12
+    if smin < 1:
+        smin = 1
+    if smax < smin:
+        smax = smin
+    if sdef < smin or sdef > smax:
+        sdef = min(max(sdef, smin), smax)
+    if psmin < 1:
+        psmin = 1
+    if psmax < psmin:
+        psmax = psmin
+    if psdef < psmin or psdef > psmax:
+        psdef = min(max(psdef, psmin), psmax)
+    try:
+        cfg_def = float(getattr(valves, "Z_IMAGE_PRESET_CFG_DEFAULT", 1.0) or 1.0)
+        cfg_max = float(getattr(valves, "Z_IMAGE_PRESET_CFG_MAX", 1.2) or 1.2)
+    except (TypeError, ValueError):
+        cfg_def, cfg_max = 1.0, 1.2
+    if cfg_max < 0.1:
+        cfg_max = 0.1
+    out: dict[str, Any] = {}
+    for k, v in presets.items():
+        if not isinstance(v, dict):
+            out[k] = v
+            continue
+        d = dict(v)
+        pm = str(d.get("model") or "")
+        if _looks_like_z_image_model(pm):
+            use_photo_range = _is_photoreal_style_key(str(k))
+            lo = psmin if use_photo_range else smin
+            hi = psmax if use_photo_range else smax
+            df = psdef if use_photo_range else sdef
+            sv = d.get("steps")
+            if isinstance(sv, (int, float, str)):
+                try:
+                    s = int(float(sv))
+                except (TypeError, ValueError):
+                    s = df
+            else:
+                s = df
+            d["steps"] = max(lo, min(hi, s))
+            cv = d.get("cfg")
+            if isinstance(cv, (int, float, str)):
+                try:
+                    c = float(cv)
+                except (TypeError, ValueError):
+                    c = cfg_def
+            else:
+                c = cfg_def
+            if c > cfg_max:
+                c = cfg_max
+            d["cfg"] = c
+        out[k] = d
+    return out
 
 
 def _merge_upscaler_config(valves: Any, cfg_extra: dict[str, Any]) -> dict[str, Any]:
@@ -1440,41 +1819,220 @@ def _resolved_style_presets_for_wizard(valves: Any) -> dict[str, Any]:
     raw_sp = (getattr(valves, "STYLE_PRESETS_JSON", None) or "").strip()
     if not raw_sp or raw_sp == "{}":
         base = _load_json_map(_EMBEDDED_STYLE_PRESETS_JSON)
-        return {**base, **_EMBEDDED_EXTRA_STYLE_PRESETS}
-    return _load_json_map(raw_sp)
+        merged = {**base, **_EMBEDDED_EXTRA_STYLE_PRESETS}
+        return _normalize_style_presets_for_z_image(valves, merged)
+    return _normalize_style_presets_for_z_image(valves, _load_json_map(raw_sp))
 
 
 def _style_preset_list_for_wizard_prompt(valves: Any) -> str:
-    """Összes preset kulcs felsorolása — a varázsló LLM a teljes listát kapja."""
+    """Összes preset: markdown táblázat (HU/EN + leírás), ugyanebben a fájlban (`format_wizard_style_preset_table_markdown`)."""
     presets = _resolved_style_presets_for_wizard(valves)
     keys = sorted(
         (str(k) for k, v in presets.items() if isinstance(v, dict)),
         key=lambda s: s.casefold(),
     )
-    if not keys:
-        return (
-            "(Nincs érvényes preset — nézd meg a Valves **STYLE_PRESETS_JSON** mezőt; "
-            "üres `{}` esetén a Pipe beágyazott listája kellene betöltődjön.)"
-        )
-    # Pontos JSON-kulcsok (aláhúzás), + olvasható név — a `style_label` szóközzel vagy aláhúzással is egyezhet.
-    return "\n".join(
-        f"- `{k}` — {k.replace('_', ' ')}" for k in keys
-    )
+    return format_wizard_style_preset_table_markdown(keys)
 
 
 def _load_wizard_system_prompt(valves: Any) -> str:
     raw = (getattr(valves, "WIZARD_SYSTEM_PROMPT", None) or "").strip()
     base = raw if raw else _EMBEDDED_WIZARD_SYSTEM_PROMPT_HU
-    inject = _style_preset_list_for_wizard_prompt(valves)
+    steps_hint = (
+        "\n\n## Opcionális lépés (steps) kérdés\n"
+        "Miután a méret megvan, kérdezd meg röviden:\n"
+        "„Maradjon az **alap/preset** lépésszám, vagy emeljük? Válasz: `nem` / `igen` / konkrét szám.”\n"
+        "- Ha `nem`: a JSON-ban `steps: null` (vagy 8, ha kifejezetten ezt kérik).\n"
+        "- Ha `igen`: állítsd `steps: 16`.\n"
+        "- Ha konkrét számot kér: használd azt, de legfeljebb **22**.\n"
+    )
+    if steps_hint not in base:
+        base += steps_hint
+    inject_style = _style_preset_list_for_wizard_prompt(valves)
+    inject_size = format_wizard_size_table_markdown()
     if "{{STYLE_PRESET_LIST}}" in base:
-        return base.replace("{{STYLE_PRESET_LIST}}", inject)
+        base = base.replace("{{STYLE_PRESET_LIST}}", inject_style)
+    if "{{WIZARD_SIZE_TABLE}}" in base:
+        base = base.replace("{{WIZARD_SIZE_TABLE}}", inject_size)
     if raw:
-        return (
-            base
-            + "\n\n## Stílus-presetek (Pipe — sorold fel mindegyiket a kérdezéskor)\n\n"
-            + inject
-        )
+        if "{{STYLE_PRESET_LIST}}" not in raw:
+            base += (
+                "\n\n## Stílus-presetek (Pipe — táblázat; mindegyik sor a kérdezéskor)\n\n"
+                + inject_style
+            )
+        if "{{WIZARD_SIZE_TABLE}}" not in raw:
+            base += "\n\n## Méret-presetek (Pipe — táblázat)\n\n" + inject_size
+        return base
     return base
+
+
+def _wizard_static_style_step_md(valves: Any) -> str:
+    """Determinista első varázsló-lépés: teljes stílus táblázat + egyértelmű kérdés."""
+    table = _style_preset_list_for_wizard_prompt(valves)
+    return (
+        "Szuper, kezdjük a stílus kiválasztásával.\n\n"
+        + table
+        + "\n\n"
+        + "Válassz egy **Kulcs**ot a táblázat első oszlopából (vagy írj saját stílust egy rövid mondatban)."
+    )
+
+
+def _wizard_should_force_style_step(raw_text: str) -> bool:
+    """
+    Kezdő, rövid „indító” képkérésnél (pl. „generálj képet”) ne az LLM döntsön:
+    adjunk fix stílus-táblát, hogy ne menjen el random kérdések irányába.
+    """
+    t = _ascii_fold_hu(raw_text or "")
+    if not t.strip():
+        return False
+    # Ha már van bundle adat, ne erőltessük az első stílus-lépést.
+    b = _parse_user_bundle(raw_text or "")
+    if any(
+        (b.get("style"), b.get("style_label"), b.get("prompt"), b.get("size"), b.get("width"), b.get("height"))
+    ):
+        return False
+    # Kifejezetten rövid, „indító” kérések.
+    if len(t) > 64:
+        return False
+    return bool(
+        re.search(
+            r"\b(generalj|genera|keszits|rajzolj|mutass|create|generate|draw)\b.{0,24}\b(kep|kepet|image|picture)\b",
+            t,
+        )
+    )
+
+
+def _wizard_confirm_go(text: str) -> bool:
+    t = _ascii_fold_hu(text or "")
+    return bool(
+        re.search(
+            r"(^|\b)(kesz mehet|mehet|inditsd|indits|start|go|igen|johet|jo mehet|ok mehet)(\b|$)",
+            t,
+        )
+    )
+
+
+def _wizard_parse_size_choice(text: str) -> tuple[int | None, int | None]:
+    # 1) direkt 1024x1536
+    w, h = _parse_size(text or "")
+    if w and h:
+        return w, h
+    # 2) "3:4 normal" / "16:9 small" / HU változatok
+    t = (text or "").strip().lower()
+    t = unicodedata.normalize("NFKD", t)
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    m = re.search(
+        r"\b(1\s*[:/\- ]\s*2|2\s*[:/\- ]\s*3|3\s*[:/\- ]\s*4|4\s*[:/\- ]\s*5|1\s*[:/\- ]\s*1|"
+        r"5\s*[:/\- ]\s*4|4\s*[:/\- ]\s*3|3\s*[:/\- ]\s*2|2\s*[:/\- ]\s*1|16\s*[:/\- ]\s*9|9\s*[:/\- ]\s*16)\b"
+        r".{0,24}\b(small|normal|large|kicsi|kozepes|nagy)\b",
+        t,
+    )
+    if not m:
+        return None, None
+    ar = re.sub(r"\s*[:/\- ]\s*", ":", m.group(1).strip())
+    tier = m.group(2)
+    idx = 0 if tier in ("small", "kicsi") else (1 if tier in ("normal", "kozepes") else 2)
+    for ratio, _label, sm, md, lg, _note in _WIZARD_SIZE_TABLE_ROWS:
+        if ratio == ar:
+            cand = (sm, md, lg)[idx]
+            return int(cand[0]), int(cand[1])
+    return None, None
+
+
+def _wizard_collect_state_from_messages(
+    valves: Any, body: dict
+) -> tuple[str, str, int | None, int | None]:
+    """
+    Állapot user üzenetekből: (style, prompt, width, height).
+    Determinisztikus wizard lépésekhez kell, hogy ne az LLM improvizáljon.
+    """
+    style = ""
+    prompt = ""
+    width: int | None = None
+    height: int | None = None
+
+    presets = _resolved_style_presets_for_wizard(valves)
+
+    def _short_style_candidate(txt: str) -> str:
+        t = (txt or "").strip()
+        if not t:
+            return ""
+        # Rövid, jelölésszerű válaszokból vegyünk csak style-t (ne a hosszú promptból).
+        if len(t) > 64:
+            return ""
+        # NSFW-t preferáljuk kevert "nsfw + anime" szövegnél.
+        if _is_nsfw_intent(valves, style=t, theme="", prompt_core=t, extra_neg=""):
+            return "nsfw"
+        pk, _pv = _match_style_preset(presets, t, "", "")
+        return str(pk) if pk else ""
+
+    for m in body.get("messages") or []:
+        if m.get("role") != "user":
+            continue
+        txt = _extract_user_content(m).strip()
+        if not txt:
+            continue
+
+        b = _parse_user_bundle(txt)
+        st = str(b.get("style") or b.get("style_label") or "").strip()
+        pr = str(b.get("prompt") or "").strip()
+        bw = b.get("width")
+        bh = b.get("height")
+
+        if st:
+            style = st
+        else:
+            cand = _short_style_candidate(txt)
+            if cand and not style:
+                style = cand
+
+        if isinstance(bw, int) and isinstance(bh, int):
+            width, height = int(bw), int(bh)
+        else:
+            sw, sh = _wizard_parse_size_choice(txt)
+            if sw and sh:
+                width, height = sw, sh
+
+        if pr:
+            prompt = pr
+        else:
+            # Nem kulcssor, nem size/confirm: promptnak tekintjük (akkor is, ha szerepel benne pl. anime).
+            raw = txt.strip()
+            if raw and len(raw) >= 20:
+                if not _wizard_confirm_go(raw):
+                    if not _wizard_parse_size_choice(raw)[0]:
+                        if not _short_style_candidate(raw):
+                            prompt = raw
+
+    return style, prompt, width, height
+
+
+def _wizard_ask_prompt_md(style: str) -> str:
+    s = (style or "").strip() or "nincs megadva"
+    return (
+        f"Stílus rendben: **`{s}`**.\n\n"
+        "Írd le pontosan, mit szeretnél látni a képen "
+        "(szereplők, környezet, hangulat, fények, kompozíció)."
+    )
+
+
+def _wizard_ask_size_md() -> str:
+    return (
+        "Szuper, megvan a prompt.\n\n"
+        + format_wizard_size_table_markdown()
+        + "\n\nVálassz képarányt és méretet (pl. `3:4 normal`, `16:9 small`) "
+        "vagy adj meg saját `szélesség×magasság` értéket (64 többszörös)."
+    )
+
+
+def _wizard_confirm_summary_md(style: str, prompt: str, width: int, height: int) -> str:
+    return (
+        "### Összegzés (generálás előtt)\n\n"
+        f"- **Stílus (`style_label`)**: `{style}`\n"
+        f"- **Prompt**: {prompt}\n"
+        f"- **Méret**: `{width}×{height}`\n"
+        "- **Negatív prompt**: automatikus (globális + stílus preset + map + opcionális user JSON)\n\n"
+        "Ha jó, írd: **`KÉSZ MEHET`** (vagy `igen`)."
+    )
 
 
 def _load_general_chat_system_prompt(valves: Any) -> str:
@@ -1668,6 +2226,38 @@ async def _async_stream_wizard_llm(
                 "a Pipe ezt openai módnak ismeri fel."
             )
         yield f"**Varázsló LLM hiba ({backend}):** {e}.{hint}"
+
+
+async def _wizard_chat_completion_once(
+    valves: Any,
+    body: dict,
+    sys_p: str,
+) -> str:
+    """
+    Fallback: ha a stream üres (néha LM Studio/Ollama stream bug), próbáljunk egy egyszeri non-stream választ.
+    """
+    omsgs = _owui_messages_for_ollama(body, sys_p)
+    if not omsgs:
+        return ""
+    base_raw, key_from_url = _parse_wizard_base_and_key(valves)
+    api_key = _resolve_openai_api_key(valves, key_from_url)
+    backend = (getattr(valves, "WIZARD_CHAT_BACKEND", None) or "ollama").strip().lower()
+    if backend not in ("ollama", "openai"):
+        backend = "ollama"
+    backend = _coerce_wizard_backend_from_url(base_raw, backend)
+    model = (getattr(valves, "OLLAMA_MODEL", None) or "").strip()
+    if not base_raw or not model:
+        return ""
+    if backend == "openai" and not api_key:
+        return ""
+    try:
+        if backend == "openai":
+            out = await _openai_chat_completion_once(base_raw, model, omsgs, api_key or None)
+        else:
+            out = await _ollama_chat_completion_once(base_raw, model, omsgs)
+        return (out or "").strip()
+    except Exception:
+        return ""
 
 
 async def _stream_ollama_chat(
@@ -1868,6 +2458,7 @@ async def _run_generate_after_parse(
         presets = {**base, **_EMBEDDED_EXTRA_STYLE_PRESETS}
     else:
         presets = _load_json_map(raw_sp)
+    presets = _normalize_style_presets_for_z_image(valves, presets)
     preset_key, preset = _match_style_preset(presets, style, theme, prompt_core)
     if (
         preset_key
@@ -1998,6 +2589,8 @@ async def _run_generate_after_parse(
         _resolve_optional_int(preset.get("seed"), valves.SEED),
     )
     steps_val = _clamp_steps_for_z_image_pipeline(valves, model, steps_val)
+    steps_val = _cap_steps_global_max(valves, steps_val)
+    cfg_val = _cap_cfg_for_z_image(valves, model, cfg_val)
 
     base = valves.BRIDGE_URL.rstrip("/")
     payload = _strip_none_payload(
@@ -2368,8 +2961,11 @@ class Pipe:
             description="Modell, ha a /models lista nem töltődik vagy nincs a választóban.",
         )
         NEGATIVE_PROMPT: str = Field(
-            default="",
-            description="Negatív prompt (minden generálásnál). Üres = CLI alapértelmezés.",
+            default=_DEFAULT_NEGATIVE_PROMPT_GLOBAL,
+            description=(
+                "Globális negatív (minden generálásnál **először**; utána stílus preset + NEGATIVE_BY_* + user). "
+                "Üres string = kikapcsolod a globális réteget. Alapértelmezés: minőség + artefakt + alap anatómia — lásd `_DEFAULT_NEGATIVE_PROMPT_GLOBAL` és `NEGATIVE_PROMPT_STRATEGY.md`."
+            ),
         )
         STYLE_PREFIX: str = Field(
             default="",
@@ -2475,9 +3071,57 @@ class Pipe:
             default=None,
             description="Globális lépésszám — **felülírja** a stílus presetet és a varázsló JSON `steps` mezőjét. Ha üres: **preset** > varázsló JSON.",
         )
+        MAX_STEPS: int = Field(
+            default=22,
+            description="Globális hard limit a végső steps értékre (alap 22).",
+        )
         CFG: float | None = Field(
             default=None,
             description="Globális CFG — **felülírja** a presetet és a varázsló JSON `cfg` / `guidanceScale` mezőjét. Ha üres: **preset** > varázsló JSON.",
+        )
+        Z_IMAGE_CFG_AUTO_CAP: bool = Field(
+            default=True,
+            description="Ha igaz (alap): z_image modelleknél a CFG értéket plafonozza (**Z_IMAGE_CFG_MAX**) a túlvezérlés elkerülésére.",
+        )
+        Z_IMAGE_CFG_MAX: float = Field(
+            default=1.0,
+            description="z_image CFG plafon, ha **Z_IMAGE_CFG_AUTO_CAP** igaz (ajánlott: 0.8–1.2).",
+        )
+        Z_IMAGE_PRESET_TUNING: bool = Field(
+            default=True,
+            description="Ha igaz (alap): z_image stílus-preset értékek automatikus finomhangolása (steps/cfg) a stabil tartományra.",
+        )
+        Z_IMAGE_PRESET_STEPS_MIN: int = Field(
+            default=6,
+            description="z_image preset minimum steps (ajánlott 6).",
+        )
+        Z_IMAGE_PRESET_STEPS_MAX: int = Field(
+            default=9,
+            description="z_image preset maximum steps (ajánlott 9).",
+        )
+        Z_IMAGE_PRESET_STEPS_DEFAULT: int = Field(
+            default=8,
+            description="z_image preset default steps, ha hiányzik/hibás (ajánlott 8).",
+        )
+        Z_IMAGE_PRESET_STEPS_MIN_PHOTO: int = Field(
+            default=8,
+            description="Fotó/ultra-real z_image preset minimum steps (ajánlott 8).",
+        )
+        Z_IMAGE_PRESET_STEPS_MAX_PHOTO: int = Field(
+            default=18,
+            description="Fotó/ultra-real z_image preset maximum steps (ajánlott 16–18).",
+        )
+        Z_IMAGE_PRESET_STEPS_DEFAULT_PHOTO: int = Field(
+            default=12,
+            description="Fotó/ultra-real z_image preset default steps (ajánlott 12).",
+        )
+        Z_IMAGE_PRESET_CFG_DEFAULT: float = Field(
+            default=1.0,
+            description="z_image preset default CFG, ha hiányzik/hibás (ajánlott 1.0).",
+        )
+        Z_IMAGE_PRESET_CFG_MAX: float = Field(
+            default=1.2,
+            description="z_image preset CFG maximum (ajánlott 1.1–1.2).",
         )
         SEED: int | None = Field(
             default=None,
@@ -2567,7 +3211,7 @@ class Pipe:
         )
         WIZARD_SYSTEM_PROMPT: str = Field(
             default="",
-            description="Üres = beágyazott magyar varázsló prompt + **`{{STYLE_PRESET_LIST}}`** helyére a **STYLE_PRESETS_JSON** összes kulcsa kerül. Saját szövegnél te is használhatod a `{{STYLE_PRESET_LIST}}` helyőrzőt; nélküle a lista a prompt végére fűződik.",
+            description="Üres = beágyazott magyar varázsló: **`{{STYLE_PRESET_LIST}}`** → stílusok táblázata; **`{{WIZARD_SIZE_TABLE}}`** → képarány × small/normal/large méretek (Pipe fájlban generált). Saját szövegnél használhatod mindkét helyőrzőt; hiányuknál a táblázatok a prompt végére fűződnek.",
         )
         WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT: bool = Field(
             default=True,
@@ -2660,7 +3304,11 @@ class Pipe:
                         buf_gc.append(ch)
                         yield ch
                     if not "".join(buf_gc).strip():
-                        yield _WIZARD_EMPTY_LLM_REPLY_HU
+                        one = await _wizard_chat_completion_once(self.valves, body, sys_g)
+                        if one:
+                            yield one
+                        else:
+                            yield _WIZARD_EMPTY_LLM_REPLY_HU
                     return
                 yield (
                     "Üdv! A **PicGEN** csatorna képgeneráláshoz van beállítva. "
@@ -2668,6 +3316,44 @@ class Pipe:
                     "akkor elindul a varázsló. Ha csak beszélgetnél, válassz másik modellt, vagy add meg a képkérést."
                 )
                 return
+            if _wizard_should_force_style_step(raw_text):
+                # Stabil indulás: az első körben mindig ugyanaz a stílus-táblás kérdés.
+                yield _wizard_static_style_step_md(self.valves)
+                return
+            # Determinisztikus wizard lépések (LLM helyett): style -> prompt -> size -> confirm.
+            st, pr, ww, hh = _wizard_collect_state_from_messages(self.valves, body)
+            if not (st or "").strip():
+                yield _wizard_static_style_step_md(self.valves)
+                return
+            if not (pr or "").strip():
+                yield _wizard_ask_prompt_md(st)
+                return
+            if not (isinstance(ww, int) and isinstance(hh, int)):
+                yield _wizard_ask_size_md()
+                return
+            if not _wizard_confirm_go(raw_text):
+                yield _wizard_confirm_summary_md(st, pr, int(ww), int(hh))
+                return
+            # Confirm után közvetlen generálás: a preset logika intézi a negatívot/modelt.
+            tp = (
+                "```json\n"
+                + json.dumps(
+                    {
+                        "ready": True,
+                        "prompt": pr,
+                        "width": int(ww),
+                        "height": int(hh),
+                        "style_label": st,
+                        "user_confirmation": "Determinista wizard confirm (KÉSZ MEHET/igen).",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n```"
+            )
+            yield "\n\n---\n\n**Képgenerálás indul…**\n\n"
+            async for part in _run_generate_after_parse(self, body, tp, emitter):
+                yield part
+            return
             sys_p = _load_wizard_system_prompt(self.valves)
             if not _owui_messages_for_ollama(body, sys_p):
                 yield "Nincs üzenet a varázsló LLM számára."
@@ -2678,8 +3364,12 @@ class Pipe:
                 yield ch
             assistant_full = "".join(buf)
             if not assistant_full.strip():
-                yield _WIZARD_EMPTY_LLM_REPLY_HU
-                return
+                one = await _wizard_chat_completion_once(self.valves, body, sys_p)
+                if not one:
+                    yield _WIZARD_EMPTY_LLM_REPLY_HU
+                    return
+                assistant_full = one
+                yield one
             jb = _try_parse_json_object(assistant_full)
             if jb and (jb.get("prompt") or "").strip():
                 yield "\n\n---\n\n**Képgenerálás indul…**\n\n"
