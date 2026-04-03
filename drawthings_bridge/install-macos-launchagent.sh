@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Miklos Lekszikov
+# SPDX-License-Identifier: MIT
+#
 # Telepíti a LaunchAgent-et: bejelentkezéskor elindul a drawthings_bridge.
 set -euo pipefail
 

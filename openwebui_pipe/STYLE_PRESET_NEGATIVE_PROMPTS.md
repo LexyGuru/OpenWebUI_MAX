@@ -1,3 +1,8 @@
+<!--
+  Copyright (c) 2026 Miklos Lekszikov
+  SPDX-License-Identifier: MIT
+-->
+
 # Beépített stílus presetek — negatív promptok
 
 Forrás: `openwebui_pipe/drawthings_bridge_pipe.py` — `_EMBEDDED_STYLE_PRESETS_JSON` + `_EMBEDDED_EXTRA_STYLE_PRESETS`.

@@ -1,3 +1,8 @@
+<!--
+  Copyright (c) 2026 Miklos Lekszikov
+  SPDX-License-Identifier: MIT
+-->
+
 # Negatív promptok bővítése — stratégia (Draw Things / z_image)
 
 **Megvalósítás a Pipe-ban:** a Valves **`NEGATIVE_PROMPT`** alapértelmezése = `_DEFAULT_NEGATIVE_PROMPT_GLOBAL` a `drawthings_bridge_pipe.py` elején; a rövidebb **extra** stílusok (`_EMBEDDED_EXTRA_STYLE_PRESETS`) kiegészültek stílus-specifikus tagokkal.

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Miklos Lekszikov
+# SPDX-License-Identifier: MIT
+#
 # Bridge futásának ellenőrzése (HTTP). Alap port: 8787 vagy DRAWTHINGS_BRIDGE_PORT.
 set -euo pipefail
 

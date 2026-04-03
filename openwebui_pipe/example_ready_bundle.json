@@ -1,4 +1,6 @@
 {
+  "_copyright": "Copyright (c) 2026 Miklos Lekszikov",
+  "_license": "MIT",
   "ready": true,
   "prompt": "Anime stílus: egy karakter, otthoni kanapén ül, lágy világítás, részletes, stúdióminőség",
   "negative_prompt": "rossz anatómia, extra ujjak, vízjel, szöveg a képen, blurry, low quality",

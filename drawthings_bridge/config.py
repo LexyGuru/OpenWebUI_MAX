@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Miklos Lekszikov
+# SPDX-License-Identifier: MIT
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 

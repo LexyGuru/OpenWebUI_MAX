@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Miklos Lekszikov
+# SPDX-License-Identifier: MIT
+
 """
 Open WebUI Pipe — Draw Things CLI bridge (HTTP + élő progress)
 

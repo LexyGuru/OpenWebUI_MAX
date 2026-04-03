@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Miklos Lekszikov
+# SPDX-License-Identifier: MIT
+#
 # drawthings_bridge — uvicorn indítás (LaunchAgent / kézi futtatás)
 set -euo pipefail
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Miklos Lekszikov
+# SPDX-License-Identifier: MIT
 set -euo pipefail
 
 LABEL="com.user.drawthings-bridge"
