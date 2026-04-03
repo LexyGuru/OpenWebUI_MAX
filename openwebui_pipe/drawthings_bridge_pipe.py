@@ -3,7 +3,7 @@ Open WebUI Pipe — Draw Things CLI bridge (HTTP + élő progress)
 
 - `STREAM_PROGRESS` **alapból be** — SSE + gyűrű + ETA; **UPSCALER_CKPT** alapból üres (stabil). **Szinkron** módban (`STREAM_PROGRESS` ki) a Pipe **előtte** kiírja: *„Képgenerálás folyamatban”* + gyűrű, hogy lásd: fut a kérés. Mac bridge: `DRAWTHINGS_BRIDGE_NO_SCRIPT=0` a `run_bridge.sh`-ban (élő CLI sorok). **Megjegyzés:** részleges PNG nincs — csak haladás vagy végén teljes kép.
 
-**Beszélgetés + kép egy menetben (ajánlott):** Valves-ban `WIZARD_OLLAMA_CHAT` alapból be, és add meg az **`OLLAMA_MODEL`**-t + **`OLLAMA_BASE_URL`** — a varázsló system prompt **be van ágyazva** a Pipe-ba (nincs külön `.txt`). A válasz **JSON**-ja után indul a Draw Things. Ha nincs explicit képkérés, ugyanaz az LLM **általános chat** módban válaszol (`WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT`, `GENERAL_CHAT_SYSTEM_PROMPT`). A modellválasztóban: **„Draw Things + beszélgetés…”** vagy egy `.ckpt`.
+**Beszélgetés + kép egy menetben (ajánlott):** Valves-ban `WIZARD_OLLAMA_CHAT` alapból be, és add meg az **`OLLAMA_MODEL`**-t + **`OLLAMA_BASE_URL`** — a varázsló system prompt **be van ágyazva** a Pipe-ba (nincs külön `.txt`). **`WIZARD_DETERMINISTIC_FLOW` alapból ki:** az LLM vezeti a kérdéseket, a válasz **JSON**-ja után indul a Draw Things. Ha **be** kapcsolod a determinisztikus ágat, a Pipe üzenetekből gyűjti a stílus/prompt/méret lépéseket (LLM nélkül). Ha nincs explicit képkérés, ugyanaz az LLM **általános chat** módban válaszol (`WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT`, `GENERAL_CHAT_SYSTEM_PROMPT`). A modellválasztóban: **„Draw Things + beszélgetés…”** vagy egy `.ckpt`.
 
 **Régi mód:** a JSON-t külön is bemásolhatod a Pipe-ba.
 
@@ -11,7 +11,7 @@ Open WebUI Pipe — Draw Things CLI bridge (HTTP + élő progress)
 1. A fő beszélgetésben egyeztess: stílus, téma, méret, prompt.
 2. Másold be ide (Pipe modell) a blokkot, vagy írd: **KÉSZ MEHET** — ha csak ez az üzenet,
    és `MERGE_HISTORY_ON_SHORT_TRIGGER` be van kapcsolva, az előző user üzenetek is bekerülnek a parsolásba.
-3. `TRIGGER_MODE`: **required** = csak triggerre indul; **optional** = trigger nélkül is megy (egész üzenet = prompt).
+3. `TRIGGER_MODE` alapból **off** (minden továbbmegy a szűrők után); **required** = csak triggerre indul; **optional** = trigger nélkül is (teljes szöveg = prompt).
 4. **NEGATIVE_PROMPT** (Valves) + stílus preset + **NEGATIVE_BY_STYLE_JSON** / **NEGATIVE_BY_THEME_JSON**: rétegezett negatív (lásd `NEGATIVE_PROMPT_STRATEGY.md`).
 5. **LORA_BY_STYLE_JSON**: stílus kulcsszó → részleges `config_json` (deep merge a CONFIG_JSON-szal).
 
@@ -55,7 +55,7 @@ _EMBEDDED_GENERAL_CHAT_SYSTEM_PROMPT_HU = (
     "Ha képet szeretne, mondja: például „Generálj képet” vagy „Készíts képet: …” — akkor a következő körben elindulhat a kép-varázsló."
 )
 
-_EMBEDDED_STYLE_PRESETS_JSON = '{"Anime":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":8,"cfg":2.0,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, too many fingers, wrong finger count, deformed hands, deformed feet, deformed face, deformed body, disproportionate limbs, long neck, long torso, floating limbs, disconnected limbs, broken pose, twisted joints, anatomical nonsense, duplicate body parts, extra arms, missing arms, bad eyes, asymmetrical eyes, cross-eyed, swollen face, lowres, blurry, out of focus, jpeg artifacts, watermark, signature, text, username, worst quality, low quality, cropped, amateur, oversaturated, flat shading, muddy colors, western cartoon, 3d render, photorealistic skin","style_prefix":"anime style, clean lineart, consistent anatomy, masterpiece, best quality, sharp focus, highly detailed","style_suffix":"coherent pose, single character focus, soft cel shading, crisp linework","width":1024,"height":1024,"config_json":{}},"Fotorealisztikus":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":20,"cfg":4.2,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, too many fingers, deformed hands, deformed feet, deformed face, deformed body, disproportionate limbs, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, plastic skin, wax skin, doll face, uncanny valley, asymmetrical eyes, cross-eyed, swollen face, skin blemishes artifacts, motion blur, out of focus, jpeg artifacts, watermark, signature, text, worst quality, low quality, oversharpened, oversaturated, cartoon, anime, illustration, painting, 3d render, cgi, duplicate, clone face","style_prefix":"photorealistic, natural skin texture, realistic lighting, sharp focus, professional photography","style_suffix":"correct perspective, natural pose, believable anatomy","width":1024,"height":1024,"config_json":{}},"Vizfestek":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":14,"cfg":4.6,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, muddy face, muddy hands, digital oversharpen, plastic, wax, 3d, cgi, vector, flat clipart, jpeg artifacts, watermark, text, worst quality, low quality, oversaturated, harsh edges, posterization, banding, chromatic aberration, duplicate subject","style_prefix":"watercolor painting, soft edges, paper texture, gentle washes","style_suffix":"coherent composition, readable silhouette","width":1024,"height":1024,"config_json":{}},"Digitalis_festmeny":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, muddy details, noise, grain overload, jpeg artifacts, watermark, text, worst quality, low quality, flat shading only, amateur, broken perspective, duplicate limbs, asymmetrical face errors, plastic skin, uncanny","style_prefix":"digital painting, detailed brushwork, rich colors, artstation quality","style_suffix":"consistent lighting, coherent anatomy","width":1024,"height":1024,"config_json":{}},"Minimal_flat":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":8,"cfg":4.0,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, clutter, noise, grain, jpeg artifacts, watermark, text, worst quality, low quality, gradients where flat required, 3d shading, photorealistic texture, busy background, duplicate elements, asymmetry errors on faces","style_prefix":"flat design, minimal, clean shapes, limited palette","style_suffix":"simple composition, readable forms","width":1024,"height":1024,"config_json":{}},"Cyberpunk":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.6,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate body parts, bad eyes, asymmetrical eyes, neon banding, jpeg artifacts, watermark, text, worst quality, low quality, muddy colors, amateur, broken perspective, inconsistent scale, floating objects without intent, cluttered unreadable silhouette","style_prefix":"cyberpunk, neon accents, futuristic city, cinematic lighting","style_suffix":"coherent scale, readable character pose","width":1024,"height":1152,"config_json":{}},"Fantasy":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":14,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate limbs, bad eyes, asymmetrical eyes, cross-eyed, swollen face, muddy textures, jpeg artifacts, watermark, text, worst quality, low quality, modern objects in scene, inconsistent lighting, amateur, broken perspective, melting features","style_prefix":"fantasy illustration, epic lighting, detailed costume, coherent world","style_suffix":"heroic pose, believable anatomy","width":1024,"height":1024,"config_json":{}},"Vazlat_ceruza":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":10,"cfg":4.3,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, smudged beyond recognition, heavy blur, jpeg artifacts, watermark, text, worst quality, low quality, full color where sketch requested, 3d render, photo, digital painting finish, duplicate strokes chaos, unreadable hands","style_prefix":"pencil sketch, hatching, construction lines, traditional media","style_suffix":"clear silhouette, readable pose","width":1024,"height":1024,"config_json":{}},"Portrait":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":20,"cfg":4.3,"negative_prompt":"bad anatomy, bad proportions, malformed face, deformed face, asymmetrical eyes, cross-eyed, misaligned eyes, swollen face, bad teeth, extra fingers, missing fingers, fused fingers, deformed hands, long neck, double face, duplicate face, plastic skin, wax skin, uncanny, jpeg artifacts, watermark, text, worst quality, low quality, out of focus, motion blur, cropped head, extra limbs, disconnected neck, anatomical nonsense, muddy skin texture","style_prefix":"portrait, head and shoulders, sharp eyes, natural skin texture","style_suffix":"correct facial symmetry, believable expression","width":896,"height":1152,"config_json":{}},"Landscape":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":18,"cfg":4.2,"negative_prompt":"bad perspective, warped horizon, duplicated mountains, melting terrain, floating rocks without intent, inconsistent scale, tiny figures with bad anatomy, extra limbs on people, malformed animals, jpeg artifacts, watermark, text, worst quality, low quality, muddy details, banding, chromatic aberration, oversharpened, amateur composition, incoherent vanishing point, duplicate elements","style_prefix":"landscape, atmospheric perspective, natural lighting, wide shot","style_suffix":"coherent depth, readable focal point","width":1152,"height":896,"config_json":{}},"Termek_foto":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":18,"cfg":4.0,"negative_prompt":"bad anatomy, deformed hands holding product, extra fingers, malformed limbs, floating product, warped product, duplicate products, melted plastic, wrong perspective, jpeg artifacts, watermark, text, worst quality, low quality, busy background, clutter, dirty lens, chromatic aberration, banding, amateur product shot, inconsistent shadows","style_prefix":"product photography, studio lighting, clean background, sharp focus","style_suffix":"accurate materials, correct scale","width":1024,"height":1024,"config_json":{}},"Sci-Fi":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate body parts, bad eyes, asymmetrical eyes, incoherent spacesuit seams, melting helmet, jpeg artifacts, watermark, text, worst quality, low quality, muddy metal, amateur, broken perspective, inconsistent scale, duplicate modules","style_prefix":"science fiction, detailed environment, cinematic lighting, coherent technology","style_suffix":"believable human scale, readable pose","width":1152,"height":896,"config_json":{}},"3D_CGI":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.4,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, low poly errors, z-fighting, broken normals, melted mesh, duplicate vertices chaos, uncanny rigging, clipping through body, jpeg artifacts, watermark, text, worst quality, low quality, flat shading where subsurface needed, amateur sculpt","style_prefix":"3d render, octane render style, clean materials, global illumination","style_suffix":"consistent topology look, believable proportions","width":1024,"height":1024,"config_json":{}},"Ink_comic":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":12,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, messy ink blobs, unreadable silhouette, jpeg artifacts, watermark, text, worst quality, low quality, muddy grays, broken panel composition, duplicate characters, asymmetrical face errors","style_prefix":"ink illustration, comic book, bold lines, selective blacks","style_suffix":"clear gesture, readable pose","width":1024,"height":1024,"config_json":{}},"nsfw":{"model":"zimageturbonsfw_45bf16diffusion_f16.ckpt","steps":20,"cfg":0.8,"negative_prompt":"child, minor, underage, school uniform suggestive minor, bad anatomy, bad proportions, malformed limbs, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, too many fingers, deformed hands, deformed feet, deformed face, deformed body, disproportionate limbs, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate body parts, worst quality, low quality, blurry, jpeg artifacts, watermark, signature, text, username, censored bar, mosaic censor, disfigured, mutation, extra heads","style_prefix":"adult subject, consenting context, coherent anatomy","style_suffix":"natural proportions, believable pose","width":1024,"height":1024,"config_json":{}}}'
+_EMBEDDED_STYLE_PRESETS_JSON = '{"Anime":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":8,"cfg":2.0,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, too many fingers, wrong finger count, deformed hands, deformed feet, deformed face, deformed body, disproportionate limbs, long neck, long torso, floating limbs, disconnected limbs, broken pose, twisted joints, anatomical nonsense, duplicate body parts, extra arms, missing arms, bad eyes, asymmetrical eyes, cross-eyed, swollen face, lowres, blurry, out of focus, jpeg artifacts, watermark, signature, text, username, worst quality, low quality, cropped, amateur, oversaturated, flat shading, muddy colors, western cartoon, 3d render, photorealistic skin","style_prefix":"anime style, clean lineart, consistent anatomy, masterpiece, best quality, sharp focus, highly detailed","style_suffix":"coherent pose, single character focus, soft cel shading, crisp linework","width":1024,"height":1024,"config_json":{}},"Fotorealisztikus":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":20,"cfg":4.2,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, too many fingers, deformed hands, deformed feet, deformed face, deformed body, disproportionate limbs, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, plastic skin, wax skin, doll face, uncanny valley, asymmetrical eyes, cross-eyed, swollen face, skin blemishes artifacts, motion blur, out of focus, jpeg artifacts, watermark, signature, text, worst quality, low quality, oversharpened, oversaturated, cartoon, anime, illustration, painting, 3d render, cgi, duplicate, clone face","style_prefix":"photorealistic, natural skin texture, realistic lighting, sharp focus, professional photography","style_suffix":"correct perspective, natural pose, believable anatomy","width":1024,"height":1024,"config_json":{}},"Vizfestek":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":14,"cfg":4.6,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, muddy face, muddy hands, digital oversharpen, plastic, wax, 3d, cgi, vector, flat clipart, jpeg artifacts, watermark, text, worst quality, low quality, oversaturated, harsh edges, posterization, banding, chromatic aberration, duplicate subject","style_prefix":"watercolor painting, soft edges, paper texture, gentle washes","style_suffix":"coherent composition, readable silhouette","width":1024,"height":1024,"config_json":{}},"Digitalis_festmeny":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, muddy details, noise, grain overload, jpeg artifacts, watermark, text, worst quality, low quality, flat shading only, amateur, broken perspective, duplicate limbs, asymmetrical face errors, plastic skin, uncanny","style_prefix":"digital painting, detailed brushwork, rich colors, artstation quality","style_suffix":"consistent lighting, coherent anatomy","width":1024,"height":1024,"config_json":{}},"Minimal_flat":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":8,"cfg":4.0,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, clutter, noise, grain, jpeg artifacts, watermark, text, worst quality, low quality, gradients where flat required, 3d shading, photorealistic texture, busy background, duplicate elements, asymmetry errors on faces","style_prefix":"flat design, minimal, clean shapes, limited palette","style_suffix":"simple composition, readable forms","width":1024,"height":1024,"config_json":{}},"Cyberpunk":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.6,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate body parts, bad eyes, asymmetrical eyes, neon banding, jpeg artifacts, watermark, text, worst quality, low quality, muddy colors, amateur, broken perspective, inconsistent scale, floating objects without intent, cluttered unreadable silhouette","style_prefix":"cyberpunk, neon accents, futuristic city, cinematic lighting","style_suffix":"coherent scale, readable character pose","width":1024,"height":1152,"config_json":{}},"Fantasy":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":14,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate limbs, bad eyes, asymmetrical eyes, cross-eyed, swollen face, muddy textures, jpeg artifacts, watermark, text, worst quality, low quality, modern objects in scene, inconsistent lighting, amateur, broken perspective, melting features","style_prefix":"fantasy illustration, epic lighting, detailed costume, coherent world","style_suffix":"heroic pose, believable anatomy","width":1024,"height":1024,"config_json":{}},"Vazlat_ceruza":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":10,"cfg":4.3,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, smudged beyond recognition, heavy blur, jpeg artifacts, watermark, text, worst quality, low quality, full color where sketch requested, 3d render, photo, digital painting finish, duplicate strokes chaos, unreadable hands","style_prefix":"pencil sketch, hatching, construction lines, traditional media","style_suffix":"clear silhouette, readable pose","width":1024,"height":1024,"config_json":{}},"Portrait":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":20,"cfg":4.3,"negative_prompt":"bad anatomy, bad proportions, malformed face, deformed face, asymmetrical eyes, cross-eyed, misaligned eyes, swollen face, bad teeth, extra fingers, missing fingers, fused fingers, deformed hands, long neck, double face, duplicate face, plastic skin, wax skin, uncanny, jpeg artifacts, watermark, text, worst quality, low quality, out of focus, motion blur, cropped head, extra limbs, disconnected neck, anatomical nonsense, muddy skin texture","style_prefix":"portrait, head and shoulders, sharp eyes, natural skin texture","style_suffix":"correct facial symmetry, believable expression","width":896,"height":1152,"config_json":{}},"Landscape":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":18,"cfg":4.2,"negative_prompt":"bad perspective, warped horizon, duplicated mountains, melting terrain, floating rocks without intent, inconsistent scale, tiny figures with bad anatomy, extra limbs on people, malformed animals, jpeg artifacts, watermark, text, worst quality, low quality, muddy details, banding, chromatic aberration, oversharpened, amateur composition, incoherent vanishing point, duplicate elements","style_prefix":"landscape, atmospheric perspective, natural lighting, wide shot","style_suffix":"coherent depth, readable focal point","width":1152,"height":896,"config_json":{}},"Termek_foto":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":18,"cfg":4.0,"negative_prompt":"bad anatomy, deformed hands holding product, extra fingers, malformed limbs, floating product, warped product, duplicate products, melted plastic, wrong perspective, jpeg artifacts, watermark, text, worst quality, low quality, busy background, clutter, dirty lens, chromatic aberration, banding, amateur product shot, inconsistent shadows","style_prefix":"product photography, studio lighting, clean background, sharp focus","style_suffix":"accurate materials, correct scale","width":1024,"height":1024,"config_json":{}},"Sci-Fi":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate body parts, bad eyes, asymmetrical eyes, incoherent spacesuit seams, melting helmet, jpeg artifacts, watermark, text, worst quality, low quality, muddy metal, amateur, broken perspective, inconsistent scale, duplicate modules","style_prefix":"science fiction, detailed environment, cinematic lighting, coherent technology","style_suffix":"believable human scale, readable pose","width":1152,"height":896,"config_json":{}},"3D_CGI":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":16,"cfg":4.4,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed feet, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, low poly errors, z-fighting, broken normals, melted mesh, duplicate vertices chaos, uncanny rigging, clipping through body, jpeg artifacts, watermark, text, worst quality, low quality, flat shading where subsurface needed, amateur sculpt","style_prefix":"3d render, octane render style, clean materials, global illumination","style_suffix":"consistent topology look, believable proportions","width":1024,"height":1024,"config_json":{}},"Ink_comic":{"model":"z_image_turbo_1.0_q8p.ckpt","steps":12,"cfg":4.5,"negative_prompt":"bad anatomy, bad proportions, malformed limbs, extra limbs, extra fingers, missing fingers, fused fingers, deformed hands, deformed face, deformed body, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, messy ink blobs, unreadable silhouette, jpeg artifacts, watermark, text, worst quality, low quality, muddy grays, broken panel composition, duplicate characters, asymmetrical face errors","style_prefix":"ink illustration, comic book, bold lines, selective blacks","style_suffix":"clear gesture, readable pose","width":1024,"height":1024,"config_json":{}},"nsfw":{"model":"zimageturbonsfw_45bf16diffusion_f16.ckpt","steps":20,"cfg":0.8,"negative_prompt":"child, minor, underage, school uniform suggestive minor, bad anatomy, bad proportions, malformed limbs, extra limbs, missing limbs, extra fingers, missing fingers, fused fingers, too many fingers, deformed hands, deformed feet, deformed face, deformed body, disproportionate limbs, long neck, floating limbs, disconnected limbs, twisted joints, anatomical nonsense, duplicate body parts, merged bodies, fused limbs, melting together, overlapping bodies, wrong contact points, worst quality, low quality, blurry, jpeg artifacts, watermark, signature, text, username, censored bar, mosaic censor, disfigured, mutation, extra heads","style_prefix":"adult subject, consenting context, coherent anatomy","style_suffix":"natural proportions, believable pose","width":1024,"height":1024,"config_json":{}}}'
 
 _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
     "Manga_fekete_feher": {
@@ -849,22 +849,31 @@ def _cap_cfg_for_z_image(
     cfg_val: float | None,
 ) -> float | None:
     """
-    z_image checkpointnál sok setupban alacsony CFG működik stabilan (0.6–1.0).
-    Ha Z_IMAGE_CFG_AUTO_CAP igaz: plafonozzuk a CFG-t Z_IMAGE_CFG_MAX értékre.
+    z_image / zimageturbo checkpointoknál a CFG értéket **0.8–1.2** (alap) tartományba húzzuk,
+    ha Z_IMAGE_CFG_AUTO_CAP be van kapcsolva (alap: igen).
     """
     if cfg_val is None:
         return None
     if not getattr(valves, "Z_IMAGE_CFG_AUTO_CAP", True):
         return cfg_val
-    if "z_image" not in (model or "").lower():
+    if not _looks_like_z_image_model(model):
         return cfg_val
     try:
-        cap = float(getattr(valves, "Z_IMAGE_CFG_MAX", 1.0) or 1.0)
+        lo = float(getattr(valves, "Z_IMAGE_CFG_MIN", 0.8) or 0.8)
     except (TypeError, ValueError):
-        cap = 1.0
-    if cap < 0.1:
-        cap = 0.1
-    return min(float(cfg_val), cap)
+        lo = 0.8
+    try:
+        hi = float(getattr(valves, "Z_IMAGE_CFG_MAX", 1.2) or 1.2)
+    except (TypeError, ValueError):
+        hi = 1.2
+    if lo > hi:
+        lo, hi = hi, lo
+    if lo < 0.1:
+        lo = 0.1
+    if hi < lo:
+        hi = lo
+    c = float(cfg_val)
+    return min(max(c, lo), hi)
 
 
 def _looks_like_z_image_model(name: str) -> bool:
@@ -886,6 +895,21 @@ def _is_photoreal_style_key(style_key: str) -> bool:
         "food_photography",
         "architectural_render",
     )
+
+
+def _skip_z_image_preset_tuning_for_entry(preset_key: str, model_name: str) -> bool:
+    """
+    A z_image turbo tuning (6–9 lépés, alacsony CFG plafon) a **nsfw** checkpointra is ráért,
+    mert a fájlnév tartalmazza a `zimageturbo` részstringet — így a preset `steps: 20` 9-re zsugorodott,
+    ami összefolyó / olvadó anatómiát okoz bonyolult pózoknál. NSFW preset / NSFW .ckpt: ne nyomjuk turbo tartományba.
+    """
+    k = _normalize_style_preset_key(preset_key or "")
+    if k in ("nsfw", "nfsw"):
+        return True
+    pm = (model_name or "").lower()
+    if "nsfw" in pm:
+        return True
+    return False
 
 
 def _normalize_style_presets_for_z_image(
@@ -936,7 +960,9 @@ def _normalize_style_presets_for_z_image(
             continue
         d = dict(v)
         pm = str(d.get("model") or "")
-        if _looks_like_z_image_model(pm):
+        if _looks_like_z_image_model(pm) and not _skip_z_image_preset_tuning_for_entry(
+            str(k), pm
+        ):
             use_photo_range = _is_photoreal_style_key(str(k))
             lo = psmin if use_photo_range else smin
             hi = psmax if use_photo_range else smax
@@ -1938,6 +1964,66 @@ def _wizard_parse_size_choice(text: str) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _wizard_edit_intent(text: str) -> str | None:
+    """
+    Rövid szerkesztési szándékok felismerése a wizard összegzés állapotában.
+
+    Csak rövid üzenetekre: hosszú jelenetleírásokban előforduló „stílus”, „prompt”, „méret”
+    szavak ne nyissák újra a teljes stílus táblát / ne ugorjanak félre a lépések.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    if len(raw) > 160:
+        return None
+    t = _ascii_fold_hu(raw)
+    if not t:
+        return None
+    if re.search(r"\b(negativ|negative)\b", t):
+        return "negative"
+    if re.search(r"\b(prompt|uj prompt|promptot|promtot)\b", t):
+        return "prompt"
+    if re.search(r"\b(meret|size|keparany|felbontas)\b", t):
+        return "size"
+    if re.search(r"\b(stilus|style|style label|style_label)\b", t):
+        return "style"
+    return None
+
+
+def _wizard_is_meta_prompt_edit_text(text: str) -> bool:
+    """Ne tekintsük tényleges képpromptnak az olyan mondatokat, mint „új promptot szeretnék”."""
+    t = _ascii_fold_hu(text or "")
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"\b(uj prompt|promptot szeretnek|promptot akarok|promptot modosit|modositanam a promptot|uj promtot)\b",
+            t,
+        )
+    )
+
+
+def _wizard_current_session_user_messages(body: dict) -> list[str]:
+    """
+    Csak az utolsó „új képkérés” ciklus user üzenetei.
+    Így a korábbi kör prompt/méret nem szivárog át az új körbe.
+    """
+    msgs = body.get("messages") or []
+    user_texts: list[str] = []
+    for m in msgs:
+        if m.get("role") == "user":
+            t = _extract_user_content(m).strip()
+            if t:
+                user_texts.append(t)
+    if not user_texts:
+        return []
+    start_idx = 0
+    for i, t in enumerate(user_texts):
+        if _wizard_should_force_style_step(t):
+            start_idx = i
+    return user_texts[start_idx:]
+
+
 def _wizard_collect_state_from_messages(
     valves: Any, body: dict
 ) -> tuple[str, str, int | None, int | None]:
@@ -1965,10 +2051,7 @@ def _wizard_collect_state_from_messages(
         pk, _pv = _match_style_preset(presets, t, "", "")
         return str(pk) if pk else ""
 
-    for m in body.get("messages") or []:
-        if m.get("role") != "user":
-            continue
-        txt = _extract_user_content(m).strip()
+    for txt in _wizard_current_session_user_messages(body):
         if not txt:
             continue
 
@@ -2000,10 +2083,71 @@ def _wizard_collect_state_from_messages(
             if raw and len(raw) >= 20:
                 if not _wizard_confirm_go(raw):
                     if not _wizard_parse_size_choice(raw)[0]:
-                        if not _short_style_candidate(raw):
+                        if not _short_style_candidate(raw) and not _wizard_is_meta_prompt_edit_text(raw):
                             prompt = raw
 
     return style, prompt, width, height
+
+
+def _wizard_style_only_message_key(valves: Any, text: str) -> str | None:
+    """
+    Ha az üzenet csak preset stílusválasztás (rövid szöveg vagy mini JSON `style_label` / `style`),
+    vissza a felismert kulcs; különben None.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    presets = _resolved_style_presets_for_wizard(valves)
+    if raw.startswith("{"):
+        try:
+            dec = json.JSONDecoder()
+            i = raw.find("{")
+            if i < 0:
+                return None
+            obj, _end = dec.raw_decode(raw[i:])
+            if not isinstance(obj, dict):
+                return None
+            if obj.get("ready"):
+                return None
+            if (obj.get("prompt") or "").strip():
+                return None
+            if obj.get("width") or obj.get("height") or (obj.get("size") or "").strip():
+                return None
+            stb = (obj.get("style") or obj.get("style_label") or "").strip()
+            if stb:
+                pk, _ = _match_style_preset(presets, stb, "", "")
+                return str(pk) if pk else None
+        except json.JSONDecodeError:
+            pass
+    if len(raw) > 64:
+        return None
+    if _is_nsfw_intent(valves, style=raw, theme="", prompt_core=raw, extra_neg=""):
+        return "nsfw" if isinstance(presets.get("nsfw"), dict) else None
+    pk, _ = _match_style_preset(presets, raw, "", "")
+    return str(pk) if pk else None
+
+
+def _wizard_non_deterministic_style_bypass_reply(valves: Any, body: dict) -> str | None:
+    """
+    Ha a varázsló LLM ága futna, de a felhasználó épp csak stílust választott (preset kulcs),
+    a következő kérdést (prompt) LLM nélkül is kiadhatjuk — elkerüli az üres LM Studio választ.
+    """
+    if getattr(valves, "WIZARD_DETERMINISTIC_FLOW", False):
+        return None
+    st, pr, ww, hh = _wizard_collect_state_from_messages(valves, body)
+    if not (st or "").strip() or (pr or "").strip():
+        return None
+    if ww is not None and hh is not None:
+        return None
+    last = (_last_user_text(body) or "").strip()
+    if not last:
+        return None
+    cand = _wizard_style_only_message_key(valves, last)
+    if not cand:
+        return None
+    if _normalize_style_preset_key(cand) != _normalize_style_preset_key(st):
+        return None
+    return _wizard_ask_prompt_md(st)
 
 
 def _wizard_ask_prompt_md(style: str) -> str:
@@ -3081,15 +3225,26 @@ class Pipe:
         )
         Z_IMAGE_CFG_AUTO_CAP: bool = Field(
             default=True,
-            description="Ha igaz (alap): z_image modelleknél a CFG értéket plafonozza (**Z_IMAGE_CFG_MAX**) a túlvezérlés elkerülésére.",
+            description=(
+                "Ha **igaz** (alap): **z_image** / **zimageturbo** .ckpt-nél a végső CFG mindig "
+                "**Z_IMAGE_CFG_MIN** és **Z_IMAGE_CFG_MAX** közé esik (alap 0.8–1.2), a preset/JSON magas értékeit is. "
+                "Ha **hamis**: a kért cfg változatlan (haladó / saját felelősség)."
+            ),
+        )
+        Z_IMAGE_CFG_MIN: float = Field(
+            default=0.8,
+            description="z_image CFG alsó határ, ha **Z_IMAGE_CFG_AUTO_CAP** igaz (ajánlott 0.8).",
         )
         Z_IMAGE_CFG_MAX: float = Field(
-            default=1.0,
-            description="z_image CFG plafon, ha **Z_IMAGE_CFG_AUTO_CAP** igaz (ajánlott: 0.8–1.2).",
+            default=1.2,
+            description="z_image CFG felső határ, ha **Z_IMAGE_CFG_AUTO_CAP** igaz (ajánlott 1.2).",
         )
         Z_IMAGE_PRESET_TUNING: bool = Field(
-            default=True,
-            description="Ha igaz (alap): z_image stílus-preset értékek automatikus finomhangolása (steps/cfg) a stabil tartományra.",
+            default=False,
+            description=(
+                "Ha **igaz**: z_image stílus-preset steps/cfg a Valves Z_IMAGE_PRESET_STEPS_MIN/MAX és Z_IMAGE_PRESET_CFG_MAX szerint igazítva (turbo-stabil). "
+                "Ha **hamis** (alap): a STYLE_PRESETS_JSON / beágyazott preset számai változatlanok."
+            ),
         )
         Z_IMAGE_PRESET_STEPS_MIN: int = Field(
             default=6,
@@ -3180,8 +3335,10 @@ class Pipe:
                 "Stílus-kulcs → preset JSON. **Üres vagy `{}` = a Pipe beágyazott listája** (ugyanaz, mint korábban a fájlban). "
                 "A `style_label` / varázsló JSON egyeztetése **normalizálja** a szóközt és aláhúzást (pl. `Digitalis_festmeny` ≈ `Digitalis festmeny`). "
                 "Saját listához illeszd be a teljes JSON-t. Beágyazott kulcsok: Anime, Fotorealisztikus, … — az **nsfw** preset külön checkpoint: `zimageturbonsfw_45bf16diffusion_f16.ckpt`, a többi alapból `z_image_turbo_1.0_q8p.ckpt`. "
-                "Mezők: `model`, `steps` (8–20 a beágyazott listában stílusonként), `cfg` (stílusonként; z_image-nél jellemzően ~4–6), `negative_prompt`, `style_prefix`/`style_suffix`, `config_json`. "
+                "Mezők: `model`, `steps`, `cfg`, `negative_prompt`, `style_prefix`/`style_suffix`, `config_json`. "
+                "A beágyazott lista stílusonként 8–20 lépés és ~2–6 CFG körül van — ezek csak akkor módosulnak, ha be van kapcsolva **Z_IMAGE_PRESET_TUNING**. "
                 "Feloldás: **Valves STEPS/CFG** > **preset** > varázsló JSON (`steps` / `cfg` / `guidanceScale`). "
+                "Végső CFG (z_image): ha **Z_IMAGE_CFG_AUTO_CAP** be van kapcsolva (alap), **Z_IMAGE_CFG_MIN**–**Z_IMAGE_CFG_MAX** (alap 0.8–1.2). "
                 "z_image turbo: alapból **ne** erőltesd a Pipe pipeline-t (**Z_IMAGE_PIPELINE_DEFAULTS** hamis = CLI-szerű); UniPC: kapcsold be + **Z_IMAGE_REFINER_HIRES** ha kell."
             ),
         )
@@ -3191,7 +3348,15 @@ class Pipe:
         )
         WIZARD_OLLAMA_CHAT: bool = Field(
             default=True,
-            description="Ha igaz: a Pipe előbb LLM-mel beszélget (varázsló), ugyanabban a körben a JSON után indul a kép. Kell: OLLAMA_MODEL + OLLAMA_BASE_URL; kikapcsolva: csak prompt/JSON → kép.",
+            description="Ha igaz és van OLLAMA_MODEL + OLLAMA_BASE_URL: kép-varázsló mód. **WIZARD_DETERMINISTIC_FLOW** hamis (alap): LLM stream + JSON → kép. Determinisztikus ág bekapcsolva: üzenetparsolás, LLM nélkül.",
+        )
+        WIZARD_DETERMINISTIC_FLOW: bool = Field(
+            default=False,
+            description=(
+                "Csak ha **WIZARD_OLLAMA_CHAT** + Ollama/LM be van állítva. "
+                "Ha **hamis** (alap): **LLM** varázsló (`WIZARD_SYSTEM_PROMPT`), válasz JSON után generálás. "
+                "Ha **igaz**: stílus/prompt/méret **user üzenetekből** (determinisztikus), megerősítés után kép — LLM varázsló nem fut."
+            ),
         )
         WIZARD_CHAT_BACKEND: str = Field(
             default="ollama",
@@ -3316,44 +3481,69 @@ class Pipe:
                     "akkor elindul a varázsló. Ha csak beszélgetnél, válassz másik modellt, vagy add meg a képkérést."
                 )
                 return
-            if _wizard_should_force_style_step(raw_text):
+            last_user = _last_user_text(body)
+            if _wizard_should_force_style_step(last_user):
                 # Stabil indulás: az első körben mindig ugyanaz a stílus-táblás kérdés.
+                # Csak az utolsó user üzenet (ne összefűzött history), különben „generálj képet”
+                # vagy trigger-merge miatt újranyílhat a tábla hosszú prompt közben.
                 yield _wizard_static_style_step_md(self.valves)
                 return
-            # Determinisztikus wizard lépések (LLM helyett): style -> prompt -> size -> confirm.
-            st, pr, ww, hh = _wizard_collect_state_from_messages(self.valves, body)
-            if not (st or "").strip():
-                yield _wizard_static_style_step_md(self.valves)
-                return
-            if not (pr or "").strip():
-                yield _wizard_ask_prompt_md(st)
-                return
-            if not (isinstance(ww, int) and isinstance(hh, int)):
-                yield _wizard_ask_size_md()
-                return
-            if not _wizard_confirm_go(raw_text):
-                yield _wizard_confirm_summary_md(st, pr, int(ww), int(hh))
-                return
-            # Confirm után közvetlen generálás: a preset logika intézi a negatívot/modelt.
-            tp = (
-                "```json\n"
-                + json.dumps(
-                    {
-                        "ready": True,
-                        "prompt": pr,
-                        "width": int(ww),
-                        "height": int(hh),
-                        "style_label": st,
-                        "user_confirmation": "Determinista wizard confirm (KÉSZ MEHET/igen).",
-                    },
-                    ensure_ascii=False,
+            if bool(getattr(self.valves, "WIZARD_DETERMINISTIC_FLOW", False)):
+                # Determinisztikus wizard: style -> prompt -> size -> confirm (LLM nélkül).
+                st, pr, ww, hh = _wizard_collect_state_from_messages(self.valves, body)
+                edit_intent = _wizard_edit_intent(last_user)
+                if edit_intent == "style":
+                    yield _wizard_static_style_step_md(self.valves)
+                    return
+                if edit_intent == "prompt":
+                    yield _wizard_ask_prompt_md(st or "nincs megadva")
+                    return
+                if edit_intent == "size":
+                    yield _wizard_ask_size_md()
+                    return
+                if edit_intent == "negative":
+                    yield (
+                        "A negatív prompt alapból automatikus (globális + stílus preset + map). "
+                        "Ha egyedi negatívot szeretnél, írd így egy sorban:\n\n"
+                        "`Negatív: ...`\n\n"
+                        "vagy JSON-ban `negative_prompt` mezővel."
+                    )
+                    return
+                if not (st or "").strip():
+                    yield _wizard_static_style_step_md(self.valves)
+                    return
+                if not (pr or "").strip():
+                    yield _wizard_ask_prompt_md(st)
+                    return
+                if not (isinstance(ww, int) and isinstance(hh, int)):
+                    yield _wizard_ask_size_md()
+                    return
+                if not _wizard_confirm_go(last_user):
+                    yield _wizard_confirm_summary_md(st, pr, int(ww), int(hh))
+                    return
+                tp = (
+                    "```json\n"
+                    + json.dumps(
+                        {
+                            "ready": True,
+                            "prompt": pr,
+                            "width": int(ww),
+                            "height": int(hh),
+                            "style_label": st,
+                            "user_confirmation": "Determinista wizard confirm (KÉSZ MEHET/igen).",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n```"
                 )
-                + "\n```"
-            )
-            yield "\n\n---\n\n**Képgenerálás indul…**\n\n"
-            async for part in _run_generate_after_parse(self, body, tp, emitter):
-                yield part
-            return
+                yield "\n\n---\n\n**Képgenerálás indul…**\n\n"
+                async for part in _run_generate_after_parse(self, body, tp, emitter):
+                    yield part
+                return
+            bypass = _wizard_non_deterministic_style_bypass_reply(self.valves, body)
+            if bypass:
+                yield bypass
+                return
             sys_p = _load_wizard_system_prompt(self.valves)
             if not _owui_messages_for_ollama(body, sys_p):
                 yield "Nincs üzenet a varázsló LLM számára."
@@ -3376,7 +3566,7 @@ class Pipe:
                 tp = "```json\n" + json.dumps(jb, ensure_ascii=False) + "\n```"
                 async for part in _run_generate_after_parse(self, body, tp, emitter):
                     yield part
-            # Nincs extra üzenet, ha még nincs JSON — a varázsló több körben kérdez (stílus, prompt…); ez normális.
+            # Nincs extra üzenet, ha még nincs JSON — a varázsló több körben kérdez; ez normális.
             return
 
         if tre and mode == "required" and not tre.search(raw_text) and not json_ready:
