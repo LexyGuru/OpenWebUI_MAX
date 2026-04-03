@@ -92,14 +92,32 @@ A Pipe **fő lépései**:
 7. **z_image** opciók: **Z_IMAGE_PIPELINE_DEFAULTS** (alap **ki**), **Z_IMAGE_REFINER_HIRES**, **UPSCALER_CKPT** — lásd lentebb.  
 8. **POST** a bridge-re: `/generate` vagy `/generate/stream` (**STREAM_PROGRESS**).
 
-### 3.1 Alapértelmezések — mi történik **automatikusan** (mit nem kell egyenként állítani)
+### 3.1 Kép-varázsló lánc (PicGEN / szabály-alapú)
+
+Ha **WIZARD_OLLAMA_CHAT** be van kapcsolva és megvan az **OLLAMA_BASE_URL** + **OLLAMA_MODEL**, a Pipe **nem** a varázsló LLM streamjét használja a lépésekhez (stabilabb, nem fagy „üres válasz”-ra). A sorrend:
+
+| # | Lépés | Mit csinál a felhasználó |
+|---|--------|-------------------------|
+| 1 | **Indítás** | Rövid képkérés (pl. „generálj képet”) → stílus-táblázat. |
+| 2 | **Stílus** | A táblázat **Kulcs**a (`style_label`), pl. `Digitalis_festmeny`. |
+| 3 | **Prompt** | Leírás, mit lássunk a képen (hosszabb szöveg). |
+| 4 | **Méret** | Pl. `3:4 normal`, `1024×1024`. |
+| 5 | **Első összegzés + lépésszám** | Összegzés + kérdés: **alapértelmezett / preset** vagy **manuális** lépés **12–22** között (pl. `16`, `manuális 18`). |
+| 6 | **CFG kérdés** | **`nem`** → preset / pipeline CFG marad, **azonnal indul** a generálás (nincs második összegzés). **`igen`** → következő üzenetben **CFG szám** (pl. `1.2`). |
+| 7 | **Második összegzés** (csak ha CFG = igen) | Látható a választott **steps** és **CFG**; ha jó: **`KÉSZ MEHET`** / `mehet` / `igen` → generálás. |
+
+Az **LLM** ebben a módban főleg **fordításra** (**ENGLISH_PROMPTS**) és **képszándék nélküli általános chatre** kell; a varázsló lépései **parsolva** mennek.
+
+**WIZARD_SYSTEM_PROMPT:** referencia / másolható szöveg; a futó varázsló **nem** küldi automatikusan a modellnek. **WIZARD_DETERMINISTIC_FLOW:** kompatibilitási mező, **nem** vált ágat.
+
+### 3.2 Alapértelmezések — mi történik **automatikusan** (mit nem kell egyenként állítani)
 
 A Pipe **Valves** mezői üresen / alapértelmezett értékkel hagyva is működnek, ha a bridge elérhető és a Draw Things modell fent van. Lényeg:
 
 | Terület | Alapból (automatikus) |
 |--------|------------------------|
 | **Bridge cím** | A repo alapja: **`http://10.0.0.136:8787`** (**BRIDGE_URL**) — a te hálózatodhoz igazítsd; ha az OWUI és a bridge **ugyanazon a gépen** van: `http://127.0.0.1:8787`. |
-| **Kép-modell (.ckpt)** | **`z_image_turbo_1.0_q8p.ckpt`** (**DEFAULT_MODEL**), ha a modellválasztó nem ad más `.ckpt`-t. A listában az első sor: *„Draw Things + beszélgetés…”* → ugyanez az alap modell. A beágyazott **nsfw** stílus külön modellt használ: **`zimageturbonsfw_45bf16diffusion_f16.ckpt`** (CFG alapból **0,8**). |
+| **Kép-modell (.ckpt)** | **`z_image_turbo_1.0_q8p.ckpt`** (**DEFAULT_MODEL**), ha a modellválasztó nem ad más `.ckpt`-t. A listában az első sor: *„Draw Things + beszélgetés (varázsló → JSON → kép)”* → ugyanez az alap modell. A beágyazott **nsfw** stílus külön modellt használ: **`zimageturbonsfw_45bf16diffusion_f16.ckpt`** (CFG alapból **0,8**). |
 | **Stílus-preset lista** | **STYLE_PRESETS_JSON** üres vagy `{}` → a Pipe **beágyazott** 15 stílus (Anime, Fotorealisztikus, …, nsfw). Nem kell bemásolni. |
 | **Stílus választása** | **Nem kell** külön mezőt állítani: a **`style_label`** a varázsló JSON-ban / bundle-ben, **vagy** a preset **neve megjelenik** a prompt / téma / stílus szövegben (pl. „cyberpunk” → **Cyberpunk** preset). Ha **semmi nem illik**, nincs preset: a modell továbbra is **DEFAULT_MODEL**, lépés/CFG **a CLI** sajátja. |
 | **Méret (width×height)** | **WIDTH** / **HEIGHT** alapból **nincs megadva** → ha a bundle/JSON sem ad méretet és a kiválasztott presetnek sincs saját mérete, a Pipe **nem küld** `--width`/`--height`-et → **a draw-things-cli / modell alap felbontása** érvényesül. |
@@ -110,14 +128,14 @@ A Pipe **Valves** mezői üresen / alapértelmezett értékkel hagyva is működ
 | **Angol prompt** | **ENGLISH_PROMPTS** = **be** → ha van **OLLAMA_MODEL** + URL, **először LLM** fordít (pozitív + negatív); különben `langdetect` + `deep-translator` (pip). |
 | **Indítás / trigger** | **TRIGGER_MODE** = **off** → nem kell „KÉSZ MEHET”; a teljes üzenet lehet prompt. **MERGE_HISTORY_ON_SHORT_TRIGGER** alapból **be** (rövid trigger + előzmény). |
 | **Explicit képkérés** | **REQUIRE_EXPLICIT_IMAGE_REQUEST** = **igaz** → közvetlen generáláshoz kell valamilyen **képkérés** (pl. „Generálj képet…”), vagy **JSON**, vagy trigger — ez **biztonság / félreértés** ellen; ha zavar, kikapcsolható (`false`). |
-| **LLM varázsló (stílus / JSON)** | **WIZARD_OLLAMA_CHAT** alapból **be**, de a varázsló **csak akkor fut**, ha be van állítva **OLLAMA_BASE_URL** és **OLLAMA_MODEL** (alapból a modellnév **üres** → **nincs** automatikus varázsló, csak **kézzel** prompt / JSON / közvetlen generálás). |
+| **Kép-varázsló + LLM** | **WIZARD_OLLAMA_CHAT** alapból **be** — a **lépések** (stílus → prompt → méret → lépés/CFG → összegzés) **szabály-alapúak**, LM Studio stream **nem** kell hozzájuk. **OLLAMA_BASE_URL** + **OLLAMA_MODEL** kell a varázsló **belépéséhez** és a **fordítás / általános chathez**; modellnév **üres** → nincs varázsló belépés, marad kézi prompt / JSON. |
 | **Általános chat kép nélkül** | Ha van **OLLAMA_***, de nincs explicit képszándék: **WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT** = **be** → rövid beszélgetés ugyanazzal az LLM-mel. |
 | **Élő progress + ETA** | **STREAM_PROGRESS** alapból **be** (SSE + gyűrű). **Ki** = szinkron `/generate` — **előtte** kiírja: *„Képgenerálás folyamatban”*, hogy lásd: fut a kérés. A **részleges kép** a CLI miatt **nem** streamelhető. |
 | **Upscale** | **UPSCALER_CKPT** alapból **üres** (stabil). Ha gond van, ne kapcsold be. |
 | **Bridge Mac** | `run_bridge.sh`: **`DRAWTHINGS_BRIDGE_NO_SCRIPT=0`** (alap) — élő CLI sorok → SSE progress. |
 | **Beállítások összegzése chatben** | **SHOW_GENERATION_PARAMS** = **be** → „Draw Things — beállítások” blokk generálás előtt. |
 
-**Összefoglalva:** alapból **nem** kell stíluslistát, méretet, lépésszámot beírni a Valves-ba — a **beágyazott presetek** + **szöveges találat** + **CLI** elég. **Kötelezően** csak a saját környezetedhez igazíts: **BRIDGE_URL** (ha nem lokális), és ha **beszélgetős varázslót** akarsz: **OLLAMA_MODEL** + **OLLAMA_BASE_URL**.
+**Összefoglalva:** alapból **nem** kell stíluslistát, méretet, lépésszámot beírni a Valves-ba — a **beágyazott presetek** + **szöveges találat** + **CLI** elég. **Kötelezően** csak a saját környezetedhez igazíts: **BRIDGE_URL** (ha nem lokális), és ha **interaktív kép-varázslót** akarsz (lásd **3.1**): **OLLAMA_MODEL** + **OLLAMA_BASE_URL**.
 
 ---
 
@@ -196,12 +214,13 @@ Az Open WebUI **Admin → Functions → Pipe → Valves** panelen. A **leírás*
 
 | Kulcs | Jelentés |
 |--------|----------|
-| **WIZARD_OLLAMA_CHAT** | LLM varázsló ugyanabban a körben. |
-| **WIZARD_CHAT_BACKEND** | `ollama` vagy `openai` (LM Studio `/v1`). |
-| **OLLAMA_BASE_URL** / **OLLAMA_MODEL** (és **WIZARD_API_KEY** LM Studio-hoz) | LLM kapcsolat. |
-| **WIZARD_SYSTEM_PROMPT** | Üres = beágyazott magyar varázsló prompt. |
+| **WIZARD_OLLAMA_CHAT** | **Be** = kép-varázsló mód (lásd **3.1**): lépések **üzenetparsolással**, nem LM Studio streammel. |
+| **WIZARD_DETERMINISTIC_FLOW** | Kompatibilitási mező; **nem** vált ágat — a varázsló mindig szabály-alapú. |
+| **WIZARD_CHAT_BACKEND** | `ollama` vagy `openai` (LM Studio `/v1`) — főleg **általános chat** és **fordítás**. |
+| **OLLAMA_BASE_URL** / **OLLAMA_MODEL** (és **WIZARD_API_KEY** LM Studio-hoz) | LLM kapcsolat (varázsló belépés + fordítás + kép nélküli chat). |
+| **WIZARD_SYSTEM_PROMPT** | A **régi** beágyazott varázsló szöveg **referenciának** / másolásnak; a futó varázsló **nem** küldi a modellnek. Üres = beágyazott magyar + `{{STYLE_PRESET_LIST}}` / `{{WIZARD_SIZE_TABLE}}`. |
 | **ENGLISH_PROMPTS** | Nem angol → fordítás (langdetect+deep-translator vagy LLM). |
-| **WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT** / **GENERAL_CHAT_SYSTEM_PROMPT** | Kép nélküli chat. |
+| **WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT** / **GENERAL_CHAT_SYSTEM_PROMPT** | Ha nincs explicit képszándék: ugyanaz az LLM általános chatként válaszol. |
 
 ### 4.9 STYLE_PRESETS_JSON
 
@@ -296,4 +315,4 @@ Ha a **`style_label": "Anime"`**, de a **prompt** egyértelműen **fotót** kér
 
 ---
 
-*Utolsó frissítés: a Pipe és bridge viselkedése a `drawthings_bridge_pipe.py` és `cli_runner.py` aktuális kódjához igazodik; ha a Valves **régi** mentett értékeket tartalmaz, **ellenőrizd** a panelt (pl. **STREAM_PROGRESS**, **Z_IMAGE_PIPELINE_DEFAULTS**).*
+*Utolsó frissítés: a Pipe és bridge viselkedése a `drawthings_bridge_pipe.py` és `cli_runner.py` aktuális kódjához igazodik (kép-varázsló lánc: **3.1**); ha a Valves **régi** mentett értékeket tartalmaz, **ellenőrizd** a panelt (pl. **STREAM_PROGRESS**, **Z_IMAGE_PIPELINE_DEFAULTS**).*

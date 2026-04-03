@@ -3,7 +3,7 @@ Open WebUI Pipe — Draw Things CLI bridge (HTTP + élő progress)
 
 - `STREAM_PROGRESS` **alapból be** — SSE + gyűrű + ETA; **UPSCALER_CKPT** alapból üres (stabil). **Szinkron** módban (`STREAM_PROGRESS` ki) a Pipe **előtte** kiírja: *„Képgenerálás folyamatban”* + gyűrű, hogy lásd: fut a kérés. Mac bridge: `DRAWTHINGS_BRIDGE_NO_SCRIPT=0` a `run_bridge.sh`-ban (élő CLI sorok). **Megjegyzés:** részleges PNG nincs — csak haladás vagy végén teljes kép.
 
-**Beszélgetés + kép egy menetben (ajánlott):** Valves-ban `WIZARD_OLLAMA_CHAT` alapból be, és add meg az **`OLLAMA_MODEL`**-t + **`OLLAMA_BASE_URL`** — a varázsló system prompt **be van ágyazva** a Pipe-ba (nincs külön `.txt`). **`WIZARD_DETERMINISTIC_FLOW` alapból ki:** az LLM vezeti a kérdéseket, a válasz **JSON**-ja után indul a Draw Things. Ha **be** kapcsolod a determinisztikus ágat, a Pipe üzenetekből gyűjti a stílus/prompt/méret lépéseket (LLM nélkül). Ha nincs explicit képkérés, ugyanaz az LLM **általános chat** módban válaszol (`WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT`, `GENERAL_CHAT_SYSTEM_PROMPT`). A modellválasztóban: **„Draw Things + beszélgetés…”** vagy egy `.ckpt`.
+**Beszélgetés + kép egy menetben (ajánlott):** Valves-ban `WIZARD_OLLAMA_CHAT` alapból be, és add meg az **`OLLAMA_MODEL`**-t + **`OLLAMA_BASE_URL`** — a kép-varázsló **szabály-alapú** (stílus → prompt → méret → megerősítés → JSON → Draw Things), **nem** függ a varázsló LLM streamjétől (LM Studio üres válasza nem akasztja el). A varázsló system prompt **be van ágyazva** (referencia / `WIZARD_SYSTEM_PROMPT`). Ha nincs explicit képkérés, ugyanaz az LLM **általános chat** módban válaszol (`WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT`, `GENERAL_CHAT_SYSTEM_PROMPT`). A modellválasztóban: **„Draw Things + beszélgetés…”** vagy egy `.ckpt`.
 
 **Régi mód:** a JSON-t külön is bemásolhatod a Pipe-ba.
 
@@ -170,6 +170,7 @@ _EMBEDDED_EXTRA_STYLE_PRESETS: dict[str, dict[str, Any]] = {
     },
 }
 
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from pydantic import BaseModel, Field
@@ -2026,15 +2027,17 @@ def _wizard_current_session_user_messages(body: dict) -> list[str]:
 
 def _wizard_collect_state_from_messages(
     valves: Any, body: dict
-) -> tuple[str, str, int | None, int | None]:
+) -> tuple[str, str, int | None, int | None, list[str]]:
     """
-    Állapot user üzenetekből: (style, prompt, width, height).
-    Determinisztikus wizard lépésekhez kell, hogy ne az LLM improvizáljon.
+    Állapot user üzenetekből: (style, prompt, width, height, post_size_messages).
+    A `post_size_messages` a méret megadása utáni user üzenetek (lépés / CFG / megerősítés).
     """
     style = ""
     prompt = ""
     width: int | None = None
     height: int | None = None
+    post_size: list[str] = []
+    size_settled = False
 
     presets = _resolved_style_presets_for_wizard(valves)
 
@@ -2053,6 +2056,10 @@ def _wizard_collect_state_from_messages(
 
     for txt in _wizard_current_session_user_messages(body):
         if not txt:
+            continue
+
+        if size_settled:
+            post_size.append(txt)
             continue
 
         b = _parse_user_bundle(txt)
@@ -2086,68 +2093,348 @@ def _wizard_collect_state_from_messages(
                         if not _short_style_candidate(raw) and not _wizard_is_meta_prompt_edit_text(raw):
                             prompt = raw
 
-    return style, prompt, width, height
+        if isinstance(width, int) and isinstance(height, int):
+            size_settled = True
+
+    return style, prompt, width, height, post_size
 
 
-def _wizard_style_only_message_key(valves: Any, text: str) -> str | None:
+def _wizard_preset_steps_cfg_hint(valves: Any, style_key: str) -> tuple[str, str]:
+    """Megjelenítéshez: preset lépés / cfg becslés (stílus kulcs alapján)."""
+    presets = _resolved_style_presets_for_wizard(valves)
+    pk, preset = _match_style_preset(presets, style_key or "", "", "")
+    if not isinstance(preset, dict):
+        return "—", "—"
+    st = preset.get("steps")
+    cg = preset.get("cfg")
+    if cg is None:
+        cg = preset.get("guidance_scale") or preset.get("guidanceScale")
+    return (
+        str(st) if st is not None else "—",
+        str(cg) if cg is not None else "—",
+    )
+
+
+def _wizard_parse_step_choice(text: str) -> tuple[str, int | None] | None:
     """
-    Ha az üzenet csak preset stílusválasztás (rövid szöveg vagy mini JSON `style_label` / `style`),
-    vissza a felismert kulcs; különben None.
+    Vissza: ('default', None) vagy ('manual', n) ahol n in 12..22; egyébként None.
     """
     raw = (text or "").strip()
     if not raw:
         return None
-    presets = _resolved_style_presets_for_wizard(valves)
-    if raw.startswith("{"):
-        try:
-            dec = json.JSONDecoder()
-            i = raw.find("{")
-            if i < 0:
-                return None
-            obj, _end = dec.raw_decode(raw[i:])
-            if not isinstance(obj, dict):
-                return None
-            if obj.get("ready"):
-                return None
-            if (obj.get("prompt") or "").strip():
-                return None
-            if obj.get("width") or obj.get("height") or (obj.get("size") or "").strip():
-                return None
-            stb = (obj.get("style") or obj.get("style_label") or "").strip()
-            if stb:
-                pk, _ = _match_style_preset(presets, stb, "", "")
-                return str(pk) if pk else None
-        except json.JSONDecodeError:
-            pass
-    if len(raw) > 64:
+    t = _ascii_fold_hu(raw)
+    if re.search(r"\b(alap|preset|default|alapertelmezett|gyari|gyári)\b", t):
+        return ("default", None)
+    if re.search(r"\b(manualis|manual|kezi|sajat|saját)\b", t):
+        m = re.search(r"\b(1[2-9]|2[0-2])\b", raw)
+        if m:
+            return ("manual", int(m.group(1)))
         return None
-    if _is_nsfw_intent(valves, style=raw, theme="", prompt_core=raw, extra_neg=""):
-        return "nsfw" if isinstance(presets.get("nsfw"), dict) else None
-    pk, _ = _match_style_preset(presets, raw, "", "")
-    return str(pk) if pk else None
+    m = re.match(r"^\s*(\d{1,2})\s*$", raw)
+    if m:
+        n = int(m.group(1))
+        if 12 <= n <= 22:
+            return ("manual", n)
+    return None
 
 
-def _wizard_non_deterministic_style_bypass_reply(valves: Any, body: dict) -> str | None:
+def _wizard_parse_cfg_yes_no(text: str) -> bool | None:
+    """CFG módosítás: True = igen, False = nem, None = nem egyértelmű."""
+    t = _ascii_fold_hu(text or "").strip()
+    if not t:
+        return None
+    if re.search(r"\b(nem|no)\b", t) and not re.search(r"\bigen\b", t):
+        return False
+    if re.search(r"\b(igen|yes)\b", t):
+        return True
+    return None
+
+
+def _wizard_parse_cfg_float(text: str) -> float | None:
+    raw = (text or "").strip().replace(",", ".")
+    if not raw:
+        return None
+    try:
+        v = float(raw)
+    except ValueError:
+        return None
+    if v <= 0 or v > 50:
+        return None
+    return v
+
+
+def _wizard_final_confirm_go(text: str) -> bool:
+    """Végleges generálás megerősítése (nem keveredik a CFG „igen”-nel az első körben)."""
+    t = _ascii_fold_hu(text or "")
+    return bool(
+        re.search(
+            r"(^|\b)(kesz mehet|mehet|inditsd|indits|start|go|igen|johet|jo mehet|ok mehet)(\b|$)",
+            t,
+        )
+    )
+
+
+@dataclass
+class WizardPostSizeState:
+    step_mode: str | None = None
+    manual_steps: int | None = None
+    cfg_change: bool | None = None
+    cfg_value: float | None = None
+
+
+def _wizard_parse_post_size_state(msgs: list[str]) -> WizardPostSizeState:
     """
-    Ha a varázsló LLM ága futna, de a felhasználó épp csak stílust választott (preset kulcs),
-    a következő kérdést (prompt) LLM nélkül is kiadhatjuk — elkerüli az üres LM Studio választ.
+    Méret utáni üzenetek: [lépés], [CFG igen/nem], [CFG szám ha igen], [végleges megerősítés ha igen].
     """
-    if getattr(valves, "WIZARD_DETERMINISTIC_FLOW", False):
-        return None
-    st, pr, ww, hh = _wizard_collect_state_from_messages(valves, body)
-    if not (st or "").strip() or (pr or "").strip():
-        return None
-    if ww is not None and hh is not None:
-        return None
-    last = (_last_user_text(body) or "").strip()
-    if not last:
-        return None
-    cand = _wizard_style_only_message_key(valves, last)
-    if not cand:
-        return None
-    if _normalize_style_preset_key(cand) != _normalize_style_preset_key(st):
-        return None
-    return _wizard_ask_prompt_md(st)
+    out = WizardPostSizeState()
+    if not msgs:
+        return out
+    r0 = _wizard_parse_step_choice(msgs[0])
+    if not r0:
+        return out
+    out.step_mode, out.manual_steps = r0
+    if len(msgs) < 2:
+        return out
+    r1 = _wizard_parse_cfg_yes_no(msgs[1])
+    if r1 is None:
+        return out
+    out.cfg_change = r1
+    if r1 is False:
+        return out
+    if len(msgs) < 3:
+        return out
+    fv = _wizard_parse_cfg_float(msgs[2])
+    if fv is not None:
+        out.cfg_value = fv
+    return out
+
+
+def _wizard_summary_block_md(
+    style: str, prompt: str, width: int, height: int, steps_line: str, cfg_line: str
+) -> str:
+    return (
+        "### Összegzés (generálás előtt)\n\n"
+        f"- **Stílus (`style_label`)**: `{style}`\n"
+        f"- **Prompt**: {prompt}\n"
+        f"- **Méret**: `{width}×{height}`\n"
+        f"- **Steps (tervezett)**: {steps_line}\n"
+        f"- **CFG (tervezett)**: {cfg_line}\n"
+        "- **Negatív prompt**: automatikus (globális + stílus preset + map + opcionális user JSON)\n"
+    )
+
+
+def _wizard_first_summary_and_step_question(
+    style: str, prompt: str, width: int, height: int, valves: Any
+) -> str:
+    ps, pc = _wizard_preset_steps_cfg_hint(valves, style)
+    body = _wizard_summary_block_md(
+        style,
+        prompt,
+        width,
+        height,
+        f"preset: **{ps}** (ha alapértelmezettet választod)",
+        f"preset: **{pc}** (ha a CFG módosításnál „nem”-et írsz)",
+    )
+    return (
+        body
+        + "\n---\n\n"
+        "**Lépésszám:** **alapértelmezett** (preset) vagy **manuális**?\n\n"
+        "- Írd: `alapértelmezett` / `preset` / `default` — a stílus preset lépése marad.\n"
+        "- Vagy **manuális** lépés **12–22** között: pl. `16`, `manuális 18`, `manual 20`.\n"
+    )
+
+
+def _wizard_ask_cfg_change_md() -> str:
+    return (
+        "**CFG (guidance) módosítás:** szeretnél ettől eltérő CFG értéket?\n\n"
+        "- Írd: **`nem`** — a preset / pipeline szerinti CFG marad, **azonnal indulhat** a generálás.\n"
+        "- Írd: **`igen`** — a következő üzenetben add meg a **CFG számot** (pl. `1.0`, `1.15`).\n"
+    )
+
+
+def _wizard_ask_cfg_value_md() -> str:
+    return (
+        "Add meg a **CFG** értékét egy számként (pl. `1.0` … `4.5` — a végleges értéket a modell "
+        "és a Pipe **Z_IMAGE_CFG** szabályai is alakíthatják).\n\n"
+        "Utána megjelenik egy **frissített összegzés**; ha jó, írd: **`KÉSZ MEHET`** (vagy `igen`)."
+    )
+
+
+def _wizard_second_summary_full_md(
+    style: str,
+    prompt: str,
+    width: int,
+    height: int,
+    step_mode: str,
+    manual_steps: int | None,
+    cfg_change: bool,
+    cfg_value: float | None,
+    valves: Any,
+) -> str:
+    ps_hint, pc_hint = _wizard_preset_steps_cfg_hint(valves, style)
+    if step_mode == "default":
+        steps_line = f"preset (**{ps_hint}** lépés)"
+    else:
+        steps_line = f"**{manual_steps}** (manuális, 12–22)"
+    if not cfg_change:
+        cfg_line = f"preset / pipeline (**{pc_hint}**)"
+    else:
+        cfg_line = f"**{cfg_value}** (megadott)"
+    return (
+        _wizard_summary_block_md(style, prompt, width, height, steps_line, cfg_line)
+        + "\n---\n\n"
+        "Ha minden rendben, írd: **`KÉSZ MEHET`** (vagy `igen` / `mehet`)."
+    )
+
+
+def _wizard_step_invalid_hint_md() -> str:
+    return (
+        "**Nem értettem a lépésszám választ.** Írd: **`alapértelmezett`** / **`preset`**, "
+        "vagy egy **12–22** közötti számot (pl. `16` vagy `manuális 16`).\n"
+    )
+
+
+def _wizard_cfg_float_invalid_md() -> str:
+    return (
+        "**Nem értettem a CFG számot.** Írj egy pozitív decimálist (pl. `1.2`), maximum ~50.\n"
+    )
+
+
+def _wizard_build_generate_json_block(
+    style: str,
+    prompt: str,
+    width: int,
+    height: int,
+    step_mode: str,
+    manual_steps: int | None,
+    cfg_override: bool,
+    cfg_value: float | None,
+) -> str:
+    d: dict[str, Any] = {
+        "ready": True,
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "style_label": style,
+        "user_confirmation": "Szabály-alapú varázsló (lépés + CFG)",
+    }
+    if step_mode == "manual" and manual_steps is not None:
+        d["steps"] = int(manual_steps)
+    if cfg_override and cfg_value is not None:
+        d["cfg"] = float(cfg_value)
+    return "```json\n" + json.dumps(d, ensure_ascii=False) + "\n```"
+
+
+async def _async_wizard_rule_based_wizard(
+    pipe: Any,
+    valves: Any,
+    body: dict,
+    emitter: Any,
+    last_user: str,
+) -> AsyncIterator[str]:
+    """
+    Kép-varázsló lépések: user üzenetekből összerakott állapot (LLM nélkül).
+    Sorrend: stílus → prompt → méret → (összegzés + lépés) → CFG kérdés → opcionális CFG szám → összegzés → generálás.
+    """
+    st, pr, ww, hh, post = _wizard_collect_state_from_messages(valves, body)
+    edit_intent = _wizard_edit_intent(last_user)
+    if edit_intent == "style":
+        yield _wizard_static_style_step_md(valves)
+        return
+    if edit_intent == "prompt":
+        yield _wizard_ask_prompt_md(st or "nincs megadva")
+        return
+    if edit_intent == "size":
+        yield _wizard_ask_size_md()
+        return
+    if edit_intent == "negative":
+        yield (
+            "A negatív prompt alapból automatikus (globális + stílus preset + map). "
+            "Ha egyedi negatívot szeretnél, írd így egy sorban:\n\n"
+            "`Negatív: ...`\n\n"
+            "vagy JSON-ban `negative_prompt` mezővel."
+        )
+        return
+    if not (st or "").strip():
+        yield _wizard_static_style_step_md(valves)
+        return
+    if not (pr or "").strip():
+        yield _wizard_ask_prompt_md(st)
+        return
+    if not (isinstance(ww, int) and isinstance(hh, int)):
+        yield _wizard_ask_size_md()
+        return
+
+    pst = _wizard_parse_post_size_state(post)
+    if pst.step_mode is None:
+        if post:
+            yield _wizard_step_invalid_hint_md()
+        yield _wizard_first_summary_and_step_question(st, pr, int(ww), int(hh), valves)
+        return
+    if pst.cfg_change is None:
+        yield _wizard_ask_cfg_change_md()
+        return
+    if pst.cfg_change is False:
+        tp = _wizard_build_generate_json_block(
+            st,
+            pr,
+            int(ww),
+            int(hh),
+            pst.step_mode,
+            pst.manual_steps,
+            False,
+            None,
+        )
+        yield "\n\n---\n\n**Képgenerálás indul…**\n\n"
+        async for part in _run_generate_after_parse(pipe, body, tp, emitter):
+            yield part
+        return
+
+    if pst.cfg_value is None:
+        if len(post) >= 3:
+            yield _wizard_cfg_float_invalid_md()
+        yield _wizard_ask_cfg_value_md()
+        return
+
+    if len(post) < 4:
+        yield _wizard_second_summary_full_md(
+            st,
+            pr,
+            int(ww),
+            int(hh),
+            pst.step_mode,
+            pst.manual_steps,
+            True,
+            pst.cfg_value,
+            valves,
+        )
+        return
+    if _wizard_final_confirm_go(last_user):
+        tp = _wizard_build_generate_json_block(
+            st,
+            pr,
+            int(ww),
+            int(hh),
+            pst.step_mode,
+            pst.manual_steps,
+            True,
+            pst.cfg_value,
+        )
+        yield "\n\n---\n\n**Képgenerálás indul…**\n\n"
+        async for part in _run_generate_after_parse(pipe, body, tp, emitter):
+            yield part
+        return
+    yield _wizard_second_summary_full_md(
+        st,
+        pr,
+        int(ww),
+        int(hh),
+        pst.step_mode,
+        pst.manual_steps,
+        True,
+        pst.cfg_value,
+        valves,
+    )
 
 
 def _wizard_ask_prompt_md(style: str) -> str:
@@ -2165,17 +2452,6 @@ def _wizard_ask_size_md() -> str:
         + format_wizard_size_table_markdown()
         + "\n\nVálassz képarányt és méretet (pl. `3:4 normal`, `16:9 small`) "
         "vagy adj meg saját `szélesség×magasság` értéket (64 többszörös)."
-    )
-
-
-def _wizard_confirm_summary_md(style: str, prompt: str, width: int, height: int) -> str:
-    return (
-        "### Összegzés (generálás előtt)\n\n"
-        f"- **Stílus (`style_label`)**: `{style}`\n"
-        f"- **Prompt**: {prompt}\n"
-        f"- **Méret**: `{width}×{height}`\n"
-        "- **Negatív prompt**: automatikus (globális + stílus preset + map + opcionális user JSON)\n\n"
-        "Ha jó, írd: **`KÉSZ MEHET`** (vagy `igen`)."
     )
 
 
@@ -3348,14 +3624,17 @@ class Pipe:
         )
         WIZARD_OLLAMA_CHAT: bool = Field(
             default=True,
-            description="Ha igaz és van OLLAMA_MODEL + OLLAMA_BASE_URL: kép-varázsló mód. **WIZARD_DETERMINISTIC_FLOW** hamis (alap): LLM stream + JSON → kép. Determinisztikus ág bekapcsolva: üzenetparsolás, LLM nélkül.",
+            description=(
+                "Ha igaz és van OLLAMA_MODEL + OLLAMA_BASE_URL: kép-varázsló mód. "
+                "A lépések (stílus → prompt → méret → megerősítés → kép) **szabály-alapúak**, LM Studio stream **nem** kell hozzájuk. "
+                "Az LLM **fordításra** (ENGLISH_PROMPTS) és **általános chatre** (ha nincs képszándék) marad."
+            ),
         )
         WIZARD_DETERMINISTIC_FLOW: bool = Field(
             default=False,
             description=(
-                "Csak ha **WIZARD_OLLAMA_CHAT** + Ollama/LM be van állítva. "
-                "Ha **hamis** (alap): **LLM** varázsló (`WIZARD_SYSTEM_PROMPT`), válasz JSON után generálás. "
-                "Ha **igaz**: stílus/prompt/méret **user üzenetekből** (determinisztikus), megerősítés után kép — LLM varázsló nem fut."
+                "**Kompatibilitási mező (jelenleg nem vált ágat):** a kép-varázsló mindig üzenetparsolásos. "
+                "Régi konfigokban maradhat; figyelmen kívül hagyható."
             ),
         )
         WIZARD_CHAT_BACKEND: str = Field(
@@ -3376,7 +3655,11 @@ class Pipe:
         )
         WIZARD_SYSTEM_PROMPT: str = Field(
             default="",
-            description="Üres = beágyazott magyar varázsló: **`{{STYLE_PRESET_LIST}}`** → stílusok táblázata; **`{{WIZARD_SIZE_TABLE}}`** → képarány × small/normal/large méretek (Pipe fájlban generált). Saját szövegnél használhatod mindkét helyőrzőt; hiányuknál a táblázatok a prompt végére fűződnek.",
+            description=(
+                "A **régi** LLM-varázsló system prompt szövege (referencia). **Üres** = a Pipe beágyazott magyar szövege: "
+                "`{{STYLE_PRESET_LIST}}`, `{{WIZARD_SIZE_TABLE}}`. A futó varázsló **nem** küldi ezt a modellnek — "
+                "a lépések szabály-alapúak; a mező saját dokumentációhoz / másoláshoz maradhat."
+            ),
         )
         WIZARD_GENERAL_CHAT_WHEN_NO_IMAGE_INTENT: bool = Field(
             default=True,
@@ -3403,7 +3686,7 @@ class Pipe:
         out.append(
             {
                 "id": PIPE_DEFAULT_MODEL_SENTINEL,
-                "name": "🖼 Draw Things + beszélgetés (LLM → JSON → kép)",
+                "name": "🖼 Draw Things + beszélgetés (varázsló → JSON → kép)",
             }
         )
         try:
@@ -3488,85 +3771,11 @@ class Pipe:
                 # vagy trigger-merge miatt újranyílhat a tábla hosszú prompt közben.
                 yield _wizard_static_style_step_md(self.valves)
                 return
-            if bool(getattr(self.valves, "WIZARD_DETERMINISTIC_FLOW", False)):
-                # Determinisztikus wizard: style -> prompt -> size -> confirm (LLM nélkül).
-                st, pr, ww, hh = _wizard_collect_state_from_messages(self.valves, body)
-                edit_intent = _wizard_edit_intent(last_user)
-                if edit_intent == "style":
-                    yield _wizard_static_style_step_md(self.valves)
-                    return
-                if edit_intent == "prompt":
-                    yield _wizard_ask_prompt_md(st or "nincs megadva")
-                    return
-                if edit_intent == "size":
-                    yield _wizard_ask_size_md()
-                    return
-                if edit_intent == "negative":
-                    yield (
-                        "A negatív prompt alapból automatikus (globális + stílus preset + map). "
-                        "Ha egyedi negatívot szeretnél, írd így egy sorban:\n\n"
-                        "`Negatív: ...`\n\n"
-                        "vagy JSON-ban `negative_prompt` mezővel."
-                    )
-                    return
-                if not (st or "").strip():
-                    yield _wizard_static_style_step_md(self.valves)
-                    return
-                if not (pr or "").strip():
-                    yield _wizard_ask_prompt_md(st)
-                    return
-                if not (isinstance(ww, int) and isinstance(hh, int)):
-                    yield _wizard_ask_size_md()
-                    return
-                if not _wizard_confirm_go(last_user):
-                    yield _wizard_confirm_summary_md(st, pr, int(ww), int(hh))
-                    return
-                tp = (
-                    "```json\n"
-                    + json.dumps(
-                        {
-                            "ready": True,
-                            "prompt": pr,
-                            "width": int(ww),
-                            "height": int(hh),
-                            "style_label": st,
-                            "user_confirmation": "Determinista wizard confirm (KÉSZ MEHET/igen).",
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n```"
-                )
-                yield "\n\n---\n\n**Képgenerálás indul…**\n\n"
-                async for part in _run_generate_after_parse(self, body, tp, emitter):
-                    yield part
-                return
-            bypass = _wizard_non_deterministic_style_bypass_reply(self.valves, body)
-            if bypass:
-                yield bypass
-                return
-            sys_p = _load_wizard_system_prompt(self.valves)
-            if not _owui_messages_for_ollama(body, sys_p):
-                yield "Nincs üzenet a varázsló LLM számára."
-                return
-            buf: list[str] = []
-            async for ch in _async_stream_wizard_llm(self.valves, body, sys_p):
-                buf.append(ch)
-                yield ch
-            assistant_full = "".join(buf)
-            if not assistant_full.strip():
-                one = await _wizard_chat_completion_once(self.valves, body, sys_p)
-                if not one:
-                    yield _WIZARD_EMPTY_LLM_REPLY_HU
-                    return
-                assistant_full = one
-                yield one
-            jb = _try_parse_json_object(assistant_full)
-            if jb and (jb.get("prompt") or "").strip():
-                yield "\n\n---\n\n**Képgenerálás indul…**\n\n"
-                tp = "```json\n" + json.dumps(jb, ensure_ascii=False) + "\n```"
-                async for part in _run_generate_after_parse(self, body, tp, emitter):
-                    yield part
-            # Nincs extra üzenet, ha még nincs JSON — a varázsló több körben kérdez; ez normális.
+            # Szabály-alapú varázsló (LLM stream nélkül) — LM Studio üres válasza nem állítja meg a folyamatot.
+            async for part in _async_wizard_rule_based_wizard(
+                self, self.valves, body, emitter, last_user
+            ):
+                yield part
             return
 
         if tre and mode == "required" and not tre.search(raw_text) and not json_ready:
