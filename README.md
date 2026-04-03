@@ -7,6 +7,8 @@
 
 Cél: **chat** az Open WebUI-ban, **képgenerálás** a `draw-things-cli generate` parancs meghívásával (HTTP bridge), **stílus-presetek**, **varázsló JSON**, **opcionális élő progress** és **CLI-szerű** alapútvonal (minőség).
 
+**Licenc:** **MIT** — szerző: **Miklos Lekszikov** (2026). Hivatalos szöveg: [`LICENSE`](LICENSE). Tájékoztató fordítások: [magyar](LICENSE.hu.md), [német](LICENSE.de.md) *(jogilag az angol `LICENSE` az irányadó)*.
+
 ---
 
 ## 1. Architektúra (rétegek)
@@ -304,7 +306,8 @@ Ha a **`style_label": "Anime"`**, de a **prompt** egyértelműen **fotót** kér
 
 | Útvonal | Szerep |
 |---------|--------|
-| `LICENSE` | **MIT License** — szerző: **Miklos Lekszikov** (2026). |
+| `LICENSE` | **MIT** (angol, hivatalos) — szerző: **Miklos Lekszikov** (2026). |
+| `LICENSE.hu.md` / `LICENSE.de.md` | MIT szöveg **magyar** / **német** fordításban (tájékoztató). |
 | `drawthings_bridge/main.py` | FastAPI bridge, `/generate`, `/generate/stream` |
 | `drawthings_bridge/cli_runner.py` | `draw-things-cli` subprocess, `DRAWTHINGS_BRIDGE_NO_SCRIPT` |
 | `drawthings_bridge/config.py` | Környezeti prefix: `DRAWTHINGS_BRIDGE_*` |
