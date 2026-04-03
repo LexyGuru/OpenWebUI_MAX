@@ -2183,11 +2183,14 @@ class WizardPostSizeState:
     manual_steps: int | None = None
     cfg_change: bool | None = None
     cfg_value: float | None = None
+    upscale_want: bool | None = None
 
 
 def _wizard_parse_post_size_state(msgs: list[str]) -> WizardPostSizeState:
     """
-    Méret utáni üzenetek: [lépés], [CFG igen/nem], [CFG szám ha igen], [végleges megerősítés ha igen].
+    Méret utáni üzenetek:
+    - CFG **nem**: [lépés], [CFG nem], [post-upscale igen/nem] → generálás
+    - CFG **igen**: [lépés], [igen], [CFG szám], [post-upscale igen/nem], [KÉSZ MEHET] → generálás
     """
     out = WizardPostSizeState()
     if not msgs:
@@ -2203,27 +2206,47 @@ def _wizard_parse_post_size_state(msgs: list[str]) -> WizardPostSizeState:
         return out
     out.cfg_change = r1
     if r1 is False:
+        if len(msgs) >= 3:
+            u = _wizard_parse_cfg_yes_no(msgs[2])
+            if u is not None:
+                out.upscale_want = u
         return out
     if len(msgs) < 3:
         return out
     fv = _wizard_parse_cfg_float(msgs[2])
     if fv is not None:
         out.cfg_value = fv
+    # Upscale csak ha a CFG szám már érvényes — különben a 4. üzenet lehet újrapróbált CFG.
+    if out.cfg_value is not None and len(msgs) >= 4:
+        u = _wizard_parse_cfg_yes_no(msgs[3])
+        if u is not None:
+            out.upscale_want = u
     return out
 
 
 def _wizard_summary_block_md(
-    style: str, prompt: str, width: int, height: int, steps_line: str, cfg_line: str
+    style: str,
+    prompt: str,
+    width: int,
+    height: int,
+    steps_line: str,
+    cfg_line: str,
+    upscale_line: str | None = None,
 ) -> str:
-    return (
+    block = (
         "### Összegzés (generálás előtt)\n\n"
         f"- **Stílus (`style_label`)**: `{style}`\n"
         f"- **Prompt**: {prompt}\n"
         f"- **Méret**: `{width}×{height}`\n"
         f"- **Steps (tervezett)**: {steps_line}\n"
         f"- **CFG (tervezett)**: {cfg_line}\n"
+    )
+    if upscale_line is not None:
+        block += f"- **Post-upscale**: {upscale_line}\n"
+    block += (
         "- **Negatív prompt**: automatikus (globális + stílus preset + map + opcionális user JSON)\n"
     )
+    return block
 
 
 def _wizard_first_summary_and_step_question(
@@ -2250,7 +2273,7 @@ def _wizard_first_summary_and_step_question(
 def _wizard_ask_cfg_change_md() -> str:
     return (
         "**CFG (guidance) módosítás:** szeretnél ettől eltérő CFG értéket?\n\n"
-        "- Írd: **`nem`** — a preset / pipeline szerinti CFG marad, **azonnal indulhat** a generálás.\n"
+        "- Írd: **`nem`** — a preset / pipeline szerinti CFG marad; **utána** egy **post-upscale** kérdés következik.\n"
         "- Írd: **`igen`** — a következő üzenetben add meg a **CFG számot** (pl. `1.0`, `1.15`).\n"
     )
 
@@ -2259,7 +2282,8 @@ def _wizard_ask_cfg_value_md() -> str:
     return (
         "Add meg a **CFG** értékét egy számként (pl. `1.0` … `4.5` — a végleges értéket a modell "
         "és a Pipe **Z_IMAGE_CFG** szabályai is alakíthatják).\n\n"
-        "Utána megjelenik egy **frissített összegzés**; ha jó, írd: **`KÉSZ MEHET`** (vagy `igen`)."
+        "Utána: **post-upscale** (igen/nem), majd egy **frissített összegzés**; ha jó, írd: "
+        "**`KÉSZ MEHET`** (vagy `igen`)."
     )
 
 
@@ -2273,6 +2297,7 @@ def _wizard_second_summary_full_md(
     cfg_change: bool,
     cfg_value: float | None,
     valves: Any,
+    upscale_want: bool,
 ) -> str:
     ps_hint, pc_hint = _wizard_preset_steps_cfg_hint(valves, style)
     if step_mode == "default":
@@ -2283,8 +2308,11 @@ def _wizard_second_summary_full_md(
         cfg_line = f"preset / pipeline (**{pc_hint}**)"
     else:
         cfg_line = f"**{cfg_value}** (megadott)"
+    us_line = _wizard_upscale_summary_line(valves, upscale_want)
     return (
-        _wizard_summary_block_md(style, prompt, width, height, steps_line, cfg_line)
+        _wizard_summary_block_md(
+            style, prompt, width, height, steps_line, cfg_line, upscale_line=us_line
+        )
         + "\n---\n\n"
         "Ha minden rendben, írd: **`KÉSZ MEHET`** (vagy `igen` / `mehet`)."
     )
@@ -2303,6 +2331,40 @@ def _wizard_cfg_float_invalid_md() -> str:
     )
 
 
+def _wizard_upscale_invalid_md() -> str:
+    return (
+        "**Nem értettem a post-upscale választ.** Írd: **`igen`** vagy **`nem`** "
+        "(Valves **UPSCALER_CKPT** alapján, ha **igen** és van fájl).\n"
+    )
+
+
+def _wizard_ask_upscale_md(valves: Any) -> str:
+    u = (getattr(valves, "UPSCALER_CKPT", None) or "").strip()
+    if u:
+        hint = f"Jelenlegi Valves **UPSCALER_CKPT**: `{u}`."
+    else:
+        hint = (
+            "A Valves **UPSCALER_CKPT** most **üres** — ha **igen**-t írsz, "
+            "nincs upscaler fájl, így nem történik tényleges upscale."
+        )
+    return (
+        "**Post-upscale:** szeretnél a generálás után upscaler lépést (pl. 2× / ESRGAN), "
+        "ahogy a Valves **UPSCALER_CKPT** beállítja?\n\n"
+        "- **`igen`** — a Pipe beolvassa a Valves upscaler + skála beállításokat (ha van mit).\n"
+        "- **`nem`** — **nincs** `upscaler` a `config_json`-ban ebben a körben.\n\n"
+        f"{hint}\n"
+    )
+
+
+def _wizard_upscale_summary_line(valves: Any, upscale_want: bool) -> str:
+    if not upscale_want:
+        return "**nem** — nincs post-upscale ebben a körben"
+    u = (getattr(valves, "UPSCALER_CKPT", None) or "").strip()
+    if u:
+        return f"**igen** — Valves `{u}`"
+    return "**igen** — Valves `UPSCALER_CKPT` üres, így nincs upscaler fájl"
+
+
 def _wizard_build_generate_json_block(
     style: str,
     prompt: str,
@@ -2312,6 +2374,8 @@ def _wizard_build_generate_json_block(
     manual_steps: int | None,
     cfg_override: bool,
     cfg_value: float | None,
+    *,
+    use_upscale: bool = True,
 ) -> str:
     d: dict[str, Any] = {
         "ready": True,
@@ -2319,7 +2383,8 @@ def _wizard_build_generate_json_block(
         "width": width,
         "height": height,
         "style_label": style,
-        "user_confirmation": "Szabály-alapú varázsló (lépés + CFG)",
+        "user_confirmation": "Szabály-alapú varázsló (lépés + CFG + post-upscale)",
+        "use_upscale": use_upscale,
     }
     if step_mode == "manual" and manual_steps is not None:
         d["steps"] = int(manual_steps)
@@ -2337,7 +2402,8 @@ async def _async_wizard_rule_based_wizard(
 ) -> AsyncIterator[str]:
     """
     Kép-varázsló lépések: user üzenetekből összerakott állapot (LLM nélkül).
-    Sorrend: stílus → prompt → méret → (összegzés + lépés) → CFG kérdés → opcionális CFG szám → összegzés → generálás.
+    Sorrend: stílus → prompt → méret → (összegzés + lépés) → CFG kérdés → opcionális CFG szám
+    → post-upscale igen/nem → összegzés (CFG igen esetén) → generálás.
     """
     st, pr, ww, hh, post = _wizard_collect_state_from_messages(valves, body)
     edit_intent = _wizard_edit_intent(last_user)
@@ -2378,6 +2444,11 @@ async def _async_wizard_rule_based_wizard(
         yield _wizard_ask_cfg_change_md()
         return
     if pst.cfg_change is False:
+        if pst.upscale_want is None:
+            if len(post) >= 3:
+                yield _wizard_upscale_invalid_md()
+            yield _wizard_ask_upscale_md(valves)
+            return
         tp = _wizard_build_generate_json_block(
             st,
             pr,
@@ -2387,6 +2458,7 @@ async def _async_wizard_rule_based_wizard(
             pst.manual_steps,
             False,
             None,
+            use_upscale=pst.upscale_want,
         )
         yield "\n\n---\n\n**Képgenerálás indul…**\n\n"
         async for part in _run_generate_after_parse(pipe, body, tp, emitter):
@@ -2399,7 +2471,13 @@ async def _async_wizard_rule_based_wizard(
         yield _wizard_ask_cfg_value_md()
         return
 
-    if len(post) < 4:
+    if pst.upscale_want is None:
+        if len(post) >= 4:
+            yield _wizard_upscale_invalid_md()
+        yield _wizard_ask_upscale_md(valves)
+        return
+
+    if len(post) < 5:
         yield _wizard_second_summary_full_md(
             st,
             pr,
@@ -2410,6 +2488,7 @@ async def _async_wizard_rule_based_wizard(
             True,
             pst.cfg_value,
             valves,
+            pst.upscale_want,
         )
         return
     if _wizard_final_confirm_go(last_user):
@@ -2422,6 +2501,7 @@ async def _async_wizard_rule_based_wizard(
             pst.manual_steps,
             True,
             pst.cfg_value,
+            use_upscale=pst.upscale_want,
         )
         yield "\n\n---\n\n**Képgenerálás indul…**\n\n"
         async for part in _run_generate_after_parse(pipe, body, tp, emitter):
@@ -2437,6 +2517,7 @@ async def _async_wizard_rule_based_wizard(
         True,
         pst.cfg_value,
         valves,
+        pst.upscale_want,
     )
 
 
@@ -2965,6 +3046,10 @@ async def _run_generate_after_parse(
         yield f"*A pozitív és/vagy negatív prompt angolra lett fordítva ({src}).*\n\n"
 
     cfg_extra = _apply_z_image_pipeline_defaults(valves, model, cfg_extra)
+    if bundle.get("use_upscale") is False:
+        cfg_extra = dict(cfg_extra)
+        for k in ("upscaler", "upscalerScaleFactor"):
+            cfg_extra.pop(k, None)
     # Csak ha a merge-elt config tényleg kikapcsolná a negatívot (ritka preset / CONFIG_JSON).
     if neg_en and cfg_extra.get("zeroNegativePrompt") is True:
         cfg_extra = _deep_merge(cfg_extra, {"zeroNegativePrompt": False})
