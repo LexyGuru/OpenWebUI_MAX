@@ -26,7 +26,7 @@ Ha a chat nem élőben frissül: böngésző / Open WebUI verzió — próbálj 
 A **modell** a chat tetején a modellválasztóban (bridge `/models`).
 """
 
-from __future__ import annotations
+from __future__ import annotations 
 
 import asyncio
 import json
@@ -2118,22 +2118,38 @@ def _wizard_preset_steps_cfg_hint(valves: Any, style_key: str) -> tuple[str, str
     )
 
 
+def _wizard_first_user_line(text: str) -> str:
+    """
+    Az első nem üres sor a user üzenetből.
+    A chat UI néha több sort vagy megjegyzést fűz (pl. „profile”), ami elrontja a teljes szövegre
+    illesztett egy-soros regexeket (pl. tiszta „12” lépésszám).
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    for ln in raw.splitlines():
+        s = ln.strip()
+        if s:
+            return s
+    return raw
+
+
 def _wizard_parse_step_choice(text: str) -> tuple[str, int | None] | None:
     """
     Vissza: ('default', None) vagy ('manual', n) ahol n in 12..22; egyébként None.
     """
-    raw = (text or "").strip()
-    if not raw:
+    primary = _wizard_first_user_line(text)
+    if not primary:
         return None
-    t = _ascii_fold_hu(raw)
+    t = _ascii_fold_hu(primary)
     if re.search(r"\b(alap|preset|default|alapertelmezett|gyari|gyári)\b", t):
         return ("default", None)
     if re.search(r"\b(manualis|manual|kezi|sajat|saját)\b", t):
-        m = re.search(r"\b(1[2-9]|2[0-2])\b", raw)
+        m = re.search(r"\b(1[2-9]|2[0-2])\b", primary)
         if m:
             return ("manual", int(m.group(1)))
         return None
-    m = re.match(r"^\s*(\d{1,2})\s*$", raw)
+    m = re.match(r"^\s*(\d{1,2})\s*$", primary)
     if m:
         n = int(m.group(1))
         if 12 <= n <= 22:
@@ -2143,7 +2159,7 @@ def _wizard_parse_step_choice(text: str) -> tuple[str, int | None] | None:
 
 def _wizard_parse_cfg_yes_no(text: str) -> bool | None:
     """CFG módosítás: True = igen, False = nem, None = nem egyértelmű."""
-    t = _ascii_fold_hu(text or "").strip()
+    t = _ascii_fold_hu(_wizard_first_user_line(text)).strip()
     if not t:
         return None
     if re.search(r"\b(nem|no)\b", t) and not re.search(r"\bigen\b", t):
@@ -2154,7 +2170,7 @@ def _wizard_parse_cfg_yes_no(text: str) -> bool | None:
 
 
 def _wizard_parse_cfg_float(text: str) -> float | None:
-    raw = (text or "").strip().replace(",", ".")
+    raw = _wizard_first_user_line(text).replace(",", ".")
     if not raw:
         return None
     try:
