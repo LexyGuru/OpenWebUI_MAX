@@ -2989,19 +2989,20 @@ async def _run_generate_after_parse(
     preset_g = preset.get("cfg")
     if preset_g is None:
         preset_g = preset.get("guidance_scale") or preset.get("guidanceScale")
-    # Feloldás: globális Valves > stílus preset > varázsló JSON (a JSON ne írja felül a preset lépés/CFG értékét).
+    # Feloldás: globális Valves > user JSON (bundle) > stílus preset.
+    # A varázsló / kézi ```json``` `steps` / `cfg` felülírja a presetet — különben a manuális lépés (pl. 16) sosem érvényesülne.
     steps_val = _resolve_optional_int(
         valves.STEPS,
         _resolve_optional_int(
-            preset.get("steps"),
             bundle.get("steps"),
+            preset.get("steps"),
         ),
     )
     cfg_val = _resolve_optional_float(
         valves.CFG,
         _resolve_optional_float(
-            preset_g,
             bundle_g,
+            preset_g,
         ),
     )
     seed_val = _resolve_optional_int(
@@ -3489,7 +3490,7 @@ class Pipe:
         HEIGHT: int | None = Field(default=None)
         STEPS: int | None = Field(
             default=None,
-            description="Globális lépésszám — **felülírja** a stílus presetet és a varázsló JSON `steps` mezőjét. Ha üres: **preset** > varázsló JSON.",
+            description="Globális lépésszám — **felülírja** mindent (preset + user JSON). Ha üres: **user JSON / bundle** `steps` > **stílus preset**.",
         )
         MAX_STEPS: int = Field(
             default=22,
@@ -3497,7 +3498,7 @@ class Pipe:
         )
         CFG: float | None = Field(
             default=None,
-            description="Globális CFG — **felülírja** a presetet és a varázsló JSON `cfg` / `guidanceScale` mezőjét. Ha üres: **preset** > varázsló JSON.",
+            description="Globális CFG — **felülírja** mindent (preset + user JSON). Ha üres: **user JSON** `cfg` / `guidanceScale` > **stílus preset**.",
         )
         Z_IMAGE_CFG_AUTO_CAP: bool = Field(
             default=True,
@@ -3613,7 +3614,7 @@ class Pipe:
                 "Saját listához illeszd be a teljes JSON-t. Beágyazott kulcsok: Anime, Fotorealisztikus, … — az **nsfw** preset külön checkpoint: `zimageturbonsfw_45bf16diffusion_f16.ckpt`, a többi alapból `z_image_turbo_1.0_q8p.ckpt`. "
                 "Mezők: `model`, `steps`, `cfg`, `negative_prompt`, `style_prefix`/`style_suffix`, `config_json`. "
                 "A beágyazott lista stílusonként 8–20 lépés és ~2–6 CFG körül van — ezek csak akkor módosulnak, ha be van kapcsolva **Z_IMAGE_PRESET_TUNING**. "
-                "Feloldás: **Valves STEPS/CFG** > **preset** > varázsló JSON (`steps` / `cfg` / `guidanceScale`). "
+                "Feloldás: **Valves STEPS/CFG** > **user JSON / bundle** (`steps` / `cfg` / `guidanceScale`) > **stílus preset**. "
                 "Végső CFG (z_image): ha **Z_IMAGE_CFG_AUTO_CAP** be van kapcsolva (alap), **Z_IMAGE_CFG_MIN**–**Z_IMAGE_CFG_MAX** (alap 0.8–1.2). "
                 "z_image turbo: alapból **ne** erőltesd a Pipe pipeline-t (**Z_IMAGE_PIPELINE_DEFAULTS** hamis = CLI-szerű); UniPC: kapcsold be + **Z_IMAGE_REFINER_HIRES** ha kell."
             ),

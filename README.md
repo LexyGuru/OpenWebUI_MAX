@@ -121,7 +121,7 @@ A Pipe **Valves** mezői üresen / alapértelmezett értékkel hagyva is működ
 | **Stílus-preset lista** | **STYLE_PRESETS_JSON** üres vagy `{}` → a Pipe **beágyazott** 15 stílus (Anime, Fotorealisztikus, …, nsfw). Nem kell bemásolni. |
 | **Stílus választása** | **Nem kell** külön mezőt állítani: a **`style_label`** a varázsló JSON-ban / bundle-ben, **vagy** a preset **neve megjelenik** a prompt / téma / stílus szövegben (pl. „cyberpunk” → **Cyberpunk** preset). Ha **semmi nem illik**, nincs preset: a modell továbbra is **DEFAULT_MODEL**, lépés/CFG **a CLI** sajátja. |
 | **Méret (width×height)** | **WIDTH** / **HEIGHT** alapból **nincs megadva** → ha a bundle/JSON sem ad méretet és a kiválasztott presetnek sincs saját mérete, a Pipe **nem küld** `--width`/`--height`-et → **a draw-things-cli / modell alap felbontása** érvényesül. |
-| **Lépés (steps) / CFG** | **STEPS** / **CFG** Valves üres → **stílus preset** (ha van) → varázsló JSON → ha mind **üres**, **CLI alap** (nincs kényszerített szám). |
+| **Lépés (steps) / CFG** | **STEPS** / **CFG** Valves üres → **varázsló / kézi JSON** (`steps` / `cfg`) → **stílus preset** → ha mind **üres**, **CLI alap**. |
 | **Seed** | **véletlen** (nincs fixálva). |
 | **Extra pipeline** | **Z_IMAGE_PIPELINE_DEFAULTS** = **ki** → nincs automatikus UniPC/refiner injektálás (CLI-szerű). **UPSCALER_CKPT** üres → nincs utó-felskálázás. |
 | **Negatív prompt (globális)** | **NEGATIVE_PROMPT** üres → csak a **preset** negatívja (ha van preset), plusz opcionális **NEGATIVE_BY_*_JSON** (alapból üres). |
@@ -165,9 +165,9 @@ Az Open WebUI **Admin → Functions → Pipe → Valves** panelen. A **leírás*
 | Kulcs | Jelentés |
 |--------|----------|
 | **WIDTH** / **HEIGHT** | Globális felbontás, ha a bundle/JSON nem adja meg. |
-| **STEPS** / **CFG** / **SEED** | **Globális felülírás** — erősebb, mint a **preset** és a **varázsló JSON** `steps` / `cfg` / `guidanceScale` mezői. |
+| **STEPS** / **CFG** / **SEED** | **Globális felülírás** — ha meg vannak adva, **minden mást** felülírnak (preset + user JSON). Ha **üresek**, a sorrend: **user JSON** → **preset** (§4.3). |
 
-**Feloldási sorrend** (lépés és CFG): **Valves STEPS/CFG** → **stílus preset** → **varázsló JSON**.
+**Feloldási sorrend** (lépés és CFG): **Valves STEPS/CFG** → **user JSON / bundle** (`steps`, `cfg`, `guidanceScale`) → **stílus preset**. A varázsló által adott érték így **nem** vész el a preset mögött.
 
 ### 4.4 Haladó: `config_json` és LoRA
 
@@ -241,7 +241,7 @@ A Pipe felismeri a ```json … ``` blokkot is. Tipikus mezők:
 | `prompt` | Pozitív prompt |
 | `negative_prompt` | Negatív |
 | `width`, `height` | Méret |
-| `steps`, `cfg` / `guidanceScale` | Lépés / CFG (preset **felülírja** a varázsló számát, **kivéve** a Valves globális STEPS/CFG) |
+| `steps`, `cfg` / `guidanceScale` | Lépés / CFG — **erősebb a stílus presetnél**; a **Valves** globális STEPS/CFG mindent felülírhat |
 | `seed` | Fix seed (vagy `null`) |
 | `style_label` / `style` | Stílus preset kulcs (pl. `Anime`, `Fotorealisztikus`, `nsfw`) |
 
@@ -266,7 +266,7 @@ Ha a **`style_label": "Anime"`**, de a **prompt** egyértelműen **fotót** kér
 2. **Ne küldjünk üres okból `config_json`-t:** a régi `zeroNegativePrompt: false` mindig bekerült — **ezt** a Pipe már csak akkor merge-eli, ha a merge-elt configban **tényleg** `zeroNegativePrompt: true` lenne.  
 3. **z_image turbo:** kevés lépés + alacsony CFG **konzolból** is jó lehet; a **preset** lépés/CFG értékei a listában vannak.  
 4. **Lassú** a filter: **STREAM_PROGRESS** = **hamis** (szinkron `/generate`, progress nélkül); alapból **be** van az SSE — ha nem kell gyűrű/ETA, kapcsold ki.  
-5. **Homály / kevés részlet:** a JSON-ban **`steps": 8`** **felülírja** a fotó preset **20** lépését — **próbáld** `null` vagy **20** a nehéz jelenetekhez.  
+5. **Homály / kevés részlet:** a **`steps`** a user JSON-ban **erősebb a presetnél** (lásd §4.3) — kevesebb lépéshez pl. **`"steps": 8`**, nehezékhez emeld (pl. **20**) vagy hagyd a presetet, ha nincs `steps` a JSON-ban.  
 6. **Refiner / hires / upscaler:** csak ha **kell** — **Z_IMAGE_REFINER_HIRES** és **UPSCALER_CKPT** külön; **hiba** („no tensors”) vagy **mosott** kép esetén kapcsold ki.
 
 ---
@@ -284,7 +284,7 @@ Ha a **`style_label": "Anime"`**, de a **prompt** egyértelműen **fotót** kér
 | **Kép nem jelenik meg a chatben** | A válasz **markdown** `![…](data:image/png;base64,…)` — nagyon nagy üzenetnél / régi OWUI-nál próbálj másik böngészőt vagy frissítést; ellenőrizd, hogy a bridge válaszában van-e `image_base64`. |
 | **„Képgenerálás” gyűrű csak a végén** | Valves: **STREAM_PROGRESS_MIN_REPLACE_INTERVAL_SEC** legyen **≤ 0,8** (alap most **0,5**). Ha a Pipe régi mentett értékkel **10**-et használ, állítsd át. Mac bridge: ha az SSE egyáltalán nem küld köztes eseményt, próbáld `DRAWTHINGS_BRIDGE_NO_SCRIPT=0` (pseudo-TTY — `cli_runner.py`). |
 | **Stream hiba / All connection attempts failed** | Az OWUI **szerver** nem éri el **BRIDGE_URL**-t (gyakran `127.0.0.1` = rossz, ha az OWUI nem a Macen fut). Állítsd a Mac **LAN IP** + `:8787`-et; `curl http://<IP>:8787/health` az OWUI gépről. Vagy **STREAM_PROGRESS** = hamis. |
-| **Rossz modell / nem nsfw preset** | A `style_label` legyen pontosan **`nsfw`** (nem `nfsw`). A Pipe most **nfsw → nsfw** alias-t is ismeri. |
+| **Rossz modell / nem nsfw preset** | A `style_label` legyen pontosan **`nsfw`** (gyakori elírás: **`nfsw`**). A Pipe ezt **automatikusan `nsfw`-re** képezi le. |
 
 ---
 
