@@ -2118,27 +2118,18 @@ def _wizard_preset_steps_cfg_hint(valves: Any, style_key: str) -> tuple[str, str
     )
 
 
-def _wizard_first_user_line(text: str) -> str:
-    """
-    Az első nem üres sor a user üzenetből.
-    A chat UI néha több sort vagy megjegyzést fűz (pl. „profile”), ami elrontja a teljes szövegre
-    illesztett egy-soros regexeket (pl. tiszta „12” lépésszám).
-    """
+def _wizard_non_empty_lines(text: str) -> list[str]:
+    """Minden nem üres sor — több soros UI (pl. címke felül, válasz alatta)."""
     raw = (text or "").strip()
     if not raw:
-        return ""
-    for ln in raw.splitlines():
-        s = ln.strip()
-        if s:
-            return s
-    return raw
+        return []
+    return [ln.strip() for ln in raw.splitlines() if ln.strip()]
 
 
-def _wizard_parse_step_choice(text: str) -> tuple[str, int | None] | None:
+def _wizard_parse_step_one_line(primary: str) -> tuple[str, int | None] | None:
     """
-    Vissza: ('default', None) vagy ('manual', n) ahol n in 12..22; egyébként None.
+    Egy sorra: ('default', None) vagy ('manual', n) ahol n in 12..22; egyébként None.
     """
-    primary = _wizard_first_user_line(text)
     if not primary:
         return None
     t = _ascii_fold_hu(primary)
@@ -2157,29 +2148,45 @@ def _wizard_parse_step_choice(text: str) -> tuple[str, int | None] | None:
     return None
 
 
+def _wizard_parse_step_choice(text: str) -> tuple[str, int | None] | None:
+    """
+    Vissza: ('default', None) vagy ('manual', n) ahol n in 12..22; egyébként None.
+    Több sor esetén soronként próbál (pl. első sor: PicGEN, második: 12).
+    """
+    for line in _wizard_non_empty_lines(text):
+        r = _wizard_parse_step_one_line(line)
+        if r is not None:
+            return r
+    return None
+
+
 def _wizard_parse_cfg_yes_no(text: str) -> bool | None:
-    """CFG módosítás: True = igen, False = nem, None = nem egyértelmű."""
-    t = _ascii_fold_hu(_wizard_first_user_line(text)).strip()
-    if not t:
+    """CFG / post-upscale igen-nem: True = igen, False = nem, None = nem egyértelmű."""
+    lines = _wizard_non_empty_lines(text)
+    if not lines:
         return None
-    if re.search(r"\b(nem|no)\b", t) and not re.search(r"\bigen\b", t):
-        return False
-    if re.search(r"\b(igen|yes)\b", t):
-        return True
+    for line in lines:
+        t = _ascii_fold_hu(line).strip()
+        if not t:
+            continue
+        if re.search(r"\b(nem|no)\b", t) and not re.search(r"\bigen\b", t):
+            return False
+        if re.search(r"\b(igen|yes)\b", t):
+            return True
     return None
 
 
 def _wizard_parse_cfg_float(text: str) -> float | None:
-    raw = _wizard_first_user_line(text).replace(",", ".")
-    if not raw:
-        return None
-    try:
-        v = float(raw)
-    except ValueError:
-        return None
-    if v <= 0 or v > 50:
-        return None
-    return v
+    for line in _wizard_non_empty_lines(text):
+        raw = line.replace(",", ".")
+        try:
+            v = float(raw)
+        except ValueError:
+            continue
+        if v <= 0 or v > 50:
+            continue
+        return v
+    return None
 
 
 def _wizard_final_confirm_go(text: str) -> bool:
